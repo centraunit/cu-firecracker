@@ -54,11 +54,16 @@ type VMManager struct {
 
 // NewCRM creates a new CRM instance
 func NewCRM() *CRM {
-	return &CRM{
+	crm := &CRM{
 		plugins:   make(map[string]*Plugin),
 		instances: make(map[string]*VMInstance),
 		vmManager: NewVMManager(),
 	}
+
+	// Load existing plugins from disk
+	crm.loadPlugins()
+
+	return crm
 }
 
 // NewVMManager creates a new VM manager
@@ -186,6 +191,11 @@ func (crm *CRM) handleUploadPlugin(w http.ResponseWriter, r *http.Request) {
 	crm.plugins[pluginID] = plugin
 	crm.mutex.Unlock()
 
+	// Save plugins to disk
+	if err := crm.savePlugins(); err != nil {
+		log.Printf("Failed to save plugins: %v", err)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(plugin)
@@ -229,6 +239,12 @@ func (crm *CRM) handleDeletePlugin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	delete(crm.plugins, pluginID)
+
+	// Save plugins to disk
+	if err := crm.savePlugins(); err != nil {
+		log.Printf("Failed to save plugins: %v", err)
+	}
+
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -452,6 +468,46 @@ func (crm *CRM) handleExecutePlugin(w http.ResponseWriter, r *http.Request) {
 }
 
 // generateID generates a unique ID
+// savePlugins saves plugins to disk
+func (crm *CRM) savePlugins() error {
+	crm.mutex.RLock()
+	defer crm.mutex.RUnlock()
+
+	pluginsDir := "./plugins"
+	if err := os.MkdirAll(pluginsDir, 0755); err != nil {
+		return err
+	}
+
+	pluginsFile := filepath.Join(pluginsDir, "plugins.json")
+	data, err := json.MarshalIndent(crm.plugins, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(pluginsFile, data, 0644)
+}
+
+// loadPlugins loads plugins from disk
+func (crm *CRM) loadPlugins() {
+	pluginsFile := "./plugins/plugins.json"
+	data, err := os.ReadFile(pluginsFile)
+	if err != nil {
+		log.Printf("No existing plugins found: %v", err)
+		return
+	}
+
+	var plugins map[string]*Plugin
+	if err := json.Unmarshal(data, &plugins); err != nil {
+		log.Printf("Failed to parse plugins file: %v", err)
+		return
+	}
+
+	crm.mutex.Lock()
+	defer crm.mutex.Unlock()
+	crm.plugins = plugins
+	log.Printf("Loaded %d plugins from disk", len(plugins))
+}
+
 func generateID() string {
 	return fmt.Sprintf("%d", time.Now().UnixNano())
 }

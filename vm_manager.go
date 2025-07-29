@@ -42,14 +42,15 @@ func (vm *VMManager) StartVM(instanceID string, plugin *Plugin) error {
 			VcpuCount:  firecracker.Int64(1),
 			MemSizeMib: firecracker.Int64(128),
 		},
-		NetworkInterfaces: []firecracker.NetworkInterface{
-			{
-				CNIConfiguration: &firecracker.CNIConfiguration{
-					NetworkName: "fcnet",
-					IfName:      "veth0",
-				},
-			},
-		},
+		// Temporarily disabled networking for testing
+		// NetworkInterfaces: []firecracker.NetworkInterface{
+		// 	{
+		// 		CNIConfiguration: &firecracker.CNIConfiguration{
+		// 			NetworkName: "fcnet",
+		// 			IfName:      "veth0",
+		// 		},
+		// 	},
+		// },
 	}
 
 	// Create Firecracker machine
@@ -129,4 +130,3 @@ func (vm *VMManager) ListVMs() []string {
 
 	return instances
 }
- 
