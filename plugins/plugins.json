@@ -1,0 +1,11 @@
+{
+  "1753816928672237106": {
+    "id": "1753816928672237106",
+    "name": "typescript-plugin",
+    "description": "TypeScript CRM plugin",
+    "rootfs_path": "plugins/1753816928672237106.ext4",
+    "kernel_path": "/opt/kernel/vmlinux",
+    "created_at": "2025-07-29T19:22:08.676870385Z",
+    "status": "ready"
+  }
+}
