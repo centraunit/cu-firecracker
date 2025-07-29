@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  crm:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./plugins:/app/plugins
+      - /tmp/firecracker:/tmp/firecracker
+    privileged: true  # Required for Firecracker
+    environment:
+      - CRM_PORT=8080
+      - FIRECRACKER_PATH=/usr/local/bin/firecracker
+      - KERNEL_PATH=/opt/kernel/vmlinux
+    cap_add:
+      - SYS_ADMIN  # Required for Firecracker
+      - NET_ADMIN
+    devices:
+      - /dev/kvm:/dev/kvm  # Required for KVM
+    command: ["./crm"] 
