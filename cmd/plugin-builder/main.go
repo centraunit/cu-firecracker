@@ -4,13 +4,11 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 )
 
-// PluginManifest represents the plugin.json structure
 type PluginManifest struct {
 	Name        string `json:"name"`
 	Version     string `json:"version"`
@@ -19,27 +17,28 @@ type PluginManifest struct {
 }
 
 func main() {
-	var (
-		pluginDir  = flag.String("plugin", "", "Path to plugin directory")
-		outputPath = flag.String("output", "", "Output path for rootfs.ext4 (optional)")
-		help       = flag.Bool("help", false, "Show help")
-	)
+	pluginDir := flag.String("plugin", "", "Plugin directory path")
+	outputPath := flag.String("output", "", "Output path for rootfs.ext4 (optional)")
+	sizeMB := flag.Int("size", 1000, "Filesystem size in MB (default: 1000)")
 	flag.Parse()
 
-	if *help {
-		fmt.Println("Plugin Builder - Export plugin Docker image to Firecracker rootfs")
-		fmt.Println("Usage: plugin-builder -plugin <plugin-dir> [-output <output-path>]")
-		fmt.Println("")
-		fmt.Println("Plugin directory must contain:")
-		fmt.Println("  - plugin.json (manifest)")
-		fmt.Println("  - Dockerfile (runtime configuration)")
-		fmt.Println("  - Source code (any language)")
-		flag.PrintDefaults()
-		return
+	if *pluginDir == "" {
+		fmt.Println("Usage: plugin-builder -plugin <plugin-directory> [-output <output-path>] [-size <size-in-mb>]")
+		fmt.Println("Example: plugin-builder -plugin plugins/my-plugin -size 2000")
+		os.Exit(1)
 	}
 
-	if *pluginDir == "" {
-		log.Fatal("Plugin directory is required")
+	// Validate plugin directory
+	if err := validatePluginDirectory(*pluginDir); err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Read plugin manifest
+	manifest, err := readPluginManifest(*pluginDir)
+	if err != nil {
+		fmt.Printf("Error reading plugin manifest: %v\n", err)
+		os.Exit(1)
 	}
 
 	// Set default output path if not provided
@@ -47,52 +46,115 @@ func main() {
 		*outputPath = filepath.Join(*pluginDir, "build", "rootfs.ext4")
 	}
 
-	if err := exportPlugin(*pluginDir, *outputPath); err != nil {
-		log.Fatalf("Failed to export plugin: %v", err)
+	fmt.Printf("Building plugin: %s (v%s)\n", manifest.Name, manifest.Version)
+	fmt.Printf("Filesystem size: %d MB\n", *sizeMB)
+
+	// Step 1: Build Docker image
+	imageName, err := buildDockerImage(*pluginDir, manifest)
+	if err != nil {
+		fmt.Printf("Error building Docker image: %v\n", err)
+		os.Exit(1)
 	}
 
-	fmt.Printf("Plugin exported successfully: %s\n", *outputPath)
+	// Step 2: Export container and create ext4 filesystem
+	if err := exportToExt4(imageName, *outputPath, *sizeMB); err != nil {
+		fmt.Printf("Error: %v\n", err)
+		// Clean up Docker image
+		cleanupDockerImage(imageName)
+		os.Exit(1)
+	}
+
+	// Step 3: Clean up Docker image
+	if err := cleanupDockerImage(imageName); err != nil {
+		fmt.Printf("Warning: Failed to clean up Docker image: %v\n", err)
+	}
+
+	fmt.Printf("Plugin exported successfully to: %s\n", *outputPath)
 }
 
-func exportPlugin(pluginDir, outputPath string) error {
-	// Step 1: Validate plugin directory
-	if err := validatePluginDirectory(pluginDir); err != nil {
-		return fmt.Errorf("plugin validation failed: %v", err)
+func exportToExt4(imageName, outputPath string, sizeMB int) error {
+	// Create output directory
+	outputDir := filepath.Dir(outputPath)
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return fmt.Errorf("failed to create output directory: %v", err)
 	}
 
-	// Step 2: Read plugin manifest
-	manifest, err := readPluginManifest(pluginDir)
+	// Generate unique container name
+	containerName := fmt.Sprintf("export-%s", sanitizeImageName(imageName))
+
+	fmt.Printf("Exporting container filesystem to ext4: %s\n", outputPath)
+
+	// Create container from image
+	createCmd := exec.Command("docker", "create", "--name", containerName, imageName)
+	if err := createCmd.Run(); err != nil {
+		return fmt.Errorf("failed to create container: %v", err)
+	}
+
+	// Clean up container when done
+	defer func() {
+		exec.Command("docker", "rm", containerName).Run()
+	}()
+
+	// Create empty ext4 filesystem
+	fmt.Printf("Creating %d MB ext4 filesystem...\n", sizeMB)
+	cmd := exec.Command("dd", "if=/dev/zero", fmt.Sprintf("of=%s", outputPath), "bs=1M", fmt.Sprintf("count=%d", sizeMB))
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to create empty file: %v", err)
+	}
+
+	// Format as ext4
+	cmd = exec.Command("mkfs.ext4", "-F", outputPath)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to format ext4: %v", err)
+	}
+
+	// Create temporary mount point
+	tempDir, err := os.MkdirTemp("", "plugin-mount-")
 	if err != nil {
-		return fmt.Errorf("failed to read plugin manifest: %v", err)
+		return fmt.Errorf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Mount the ext4 filesystem
+	cmd = exec.Command("sudo", "mount", "-o", "loop", outputPath, tempDir)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to mount ext4: %v", err)
 	}
 
-	// Step 3: Build Docker image
-	imageName, err := buildDockerImage(pluginDir, manifest)
-	if err != nil {
-		return fmt.Errorf("failed to build Docker image: %v", err)
+	// Ensure umount happens
+	defer func() {
+		exec.Command("sudo", "umount", tempDir).Run()
+	}()
+
+	// Export container filesystem to tar and extract to mounted ext4
+	exportCmd := exec.Command("docker", "export", containerName)
+	extractCmd := exec.Command("sudo", "tar", "-xf", "-", "-C", tempDir)
+
+	// Connect the commands with a pipe
+	extractCmd.Stdin, _ = exportCmd.StdoutPipe()
+
+	// Start the extract command
+	if err := extractCmd.Start(); err != nil {
+		return fmt.Errorf("failed to start extract command: %v", err)
 	}
 
-	// Step 4: Export container filesystem to rootfs.ext4
-	if err := exportContainerToRootfs(imageName, outputPath); err != nil {
-		return fmt.Errorf("failed to export rootfs: %v", err)
+	// Run the export command
+	if err := exportCmd.Run(); err != nil {
+		return fmt.Errorf("failed to export container: %v", err)
 	}
 
-	// Step 5: Clean up Docker image
-	if err := cleanupDockerImage(imageName); err != nil {
-		log.Printf("Warning: failed to clean up Docker image: %v", err)
+	// Wait for extract to complete
+	if err := extractCmd.Wait(); err != nil {
+		return fmt.Errorf("failed to extract to ext4: %v", err)
 	}
 
+	fmt.Printf("Successfully created ext4 filesystem: %s\n", outputPath)
 	return nil
 }
 
 func validatePluginDirectory(pluginDir string) error {
-	// Check if directory exists
-	if _, err := os.Stat(pluginDir); os.IsNotExist(err) {
-		return fmt.Errorf("plugin directory does not exist: %s", pluginDir)
-	}
-
-	// Check for required files
 	requiredFiles := []string{"plugin.json", "Dockerfile"}
+
 	for _, file := range requiredFiles {
 		filePath := filepath.Join(pluginDir, file)
 		if _, err := os.Stat(filePath); os.IsNotExist(err) {
@@ -115,107 +177,23 @@ func readPluginManifest(pluginDir string) (*PluginManifest, error) {
 		return nil, fmt.Errorf("failed to parse plugin.json: %v", err)
 	}
 
-	// Validate manifest
-	if manifest.Name == "" {
-		return nil, fmt.Errorf("plugin name is required in plugin.json")
-	}
-	if manifest.Version == "" {
-		return nil, fmt.Errorf("plugin version is required in plugin.json")
-	}
-	if manifest.Port == 0 {
-		return nil, fmt.Errorf("plugin port is required in plugin.json")
-	}
-
 	return &manifest, nil
 }
 
 func buildDockerImage(pluginDir string, manifest *PluginManifest) (string, error) {
-	// Generate unique image name
-	imageName := fmt.Sprintf("plugin-%s-%s", manifest.Name, manifest.Version)
-	imageName = sanitizeImageName(imageName)
+	imageName := fmt.Sprintf("plugin-%s-%s", sanitizeImageName(manifest.Name), manifest.Version)
 
 	fmt.Printf("Building Docker image: %s\n", imageName)
 
-	// Build Docker image
 	cmd := exec.Command("docker", "build", "-t", imageName, pluginDir)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("Docker build failed: %v", err)
+		return "", fmt.Errorf("failed to build Docker image: %v", err)
 	}
 
 	return imageName, nil
-}
-
-func exportContainerToRootfs(imageName, outputPath string) error {
-	// Create output directory
-	outputDir := filepath.Dir(outputPath)
-	if err := os.MkdirAll(outputDir, 0755); err != nil {
-		return fmt.Errorf("failed to create output directory: %v", err)
-	}
-
-	// Generate unique container name
-	containerName := fmt.Sprintf("export-%s", sanitizeImageName(imageName))
-
-	fmt.Printf("Exporting container filesystem to: %s\n", outputPath)
-
-	// Create container from image
-	createCmd := exec.Command("docker", "create", "--name", containerName, imageName)
-	if err := createCmd.Run(); err != nil {
-		return fmt.Errorf("failed to create container: %v", err)
-	}
-
-	// Clean up container when done
-	defer func() {
-		exec.Command("docker", "rm", containerName).Run()
-	}()
-
-	// Export container filesystem to tar
-	tarPath := outputPath + ".tar"
-	exportCmd := exec.Command("docker", "export", containerName)
-	exportFile, err := os.Create(tarPath)
-	if err != nil {
-		return fmt.Errorf("failed to create tar file: %v", err)
-	}
-	defer exportFile.Close()
-	defer os.Remove(tarPath)
-
-	exportCmd.Stdout = exportFile
-	if err := exportCmd.Run(); err != nil {
-		return fmt.Errorf("failed to export container: %v", err)
-	}
-
-	// Convert tar to ext4
-	if err := convertTarToExt4(tarPath, outputPath); err != nil {
-		return fmt.Errorf("failed to convert tar to ext4: %v", err)
-	}
-
-	return nil
-}
-
-func convertTarToExt4(tarPath, outputPath string) error {
-	// For development, create a placeholder
-	// In production, you'd use tools like:
-	// - virt-make-fs (from libguestfs-tools)
-	// - genext2fs
-	// - or mount the tar and create ext4 filesystem
-
-	fmt.Printf("Converting tar to ext4...\n")
-
-	// Check if virt-make-fs is available
-	if _, err := exec.LookPath("virt-make-fs"); err == nil {
-		// Use virt-make-fs if available
-		cmd := exec.Command("sudo", "virt-make-fs", "--format=ext4", "--size=100M", tarPath, outputPath)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		return cmd.Run()
-	}
-
-	// Fallback: create placeholder (for development)
-	fmt.Printf("Warning: virt-make-fs not found, creating placeholder file\n")
-	placeholder := []byte("DOCKER_EXPORTED_ROOTFS_PLACEHOLDER")
-	return os.WriteFile(outputPath, placeholder, 0644)
 }
 
 func cleanupDockerImage(imageName string) error {
