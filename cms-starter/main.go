@@ -20,9 +20,10 @@ import (
 )
 
 const (
-	CMSImageName   = "issaprodev/cu-cms:latest"
-	DataDir        = "./cms-data"
-	FirecrackerDir = "./firecracker-tmp"
+	CMSImageName     = "issaprodev/cu-cms:latest"
+	DataDir          = "./cms-data"
+	FirecrackerDir   = "./firecracker-tmp"
+	CMSContainerName = "cu-firecracker-cms"
 )
 
 type CMSStarter struct {
@@ -117,7 +118,6 @@ func init() {
 	// Start command flags
 	startCmd.Flags().IntVarP(&port, "port", "p", 80, "Port to run the CMS on")
 	startCmd.Flags().StringVarP(&dataDir, "data-dir", "d", DataDir, "Data directory for CMS")
-	startCmd.MarkFlagRequired("port")
 
 	// Plugin build command flags
 	buildCmd.Flags().String("plugin", "", "Plugin directory path")
@@ -595,7 +595,7 @@ func (s *CMSStarter) startCMSContainer() error {
 		hostConfig,
 		nil,
 		nil,
-		"cms-container",
+		CMSContainerName,
 	)
 	if err != nil {
 		return fmt.Errorf("Failed to create container: %v", err)
@@ -650,7 +650,8 @@ func (s *CMSStarter) stopCMSContainer() error {
 
 	for _, c := range containers {
 		for _, name := range c.Names {
-			if strings.Contains(name, "cms-container") {
+			// Check for our specific CMS container
+			if strings.Contains(name, CMSContainerName) {
 				fmt.Printf("🛑 Stopping container: %s\n", c.ID[:12])
 				if err := s.dockerClient.ContainerStop(context.Background(), c.ID, container.StopOptions{}); err != nil {
 					return fmt.Errorf("Failed to stop container: %v", err)
@@ -675,7 +676,8 @@ func (s *CMSStarter) stopCMSContainerPreserveData() error {
 
 	for _, c := range containers {
 		for _, name := range c.Names {
-			if strings.Contains(name, "cms-container") {
+			// Check for our specific CMS container
+			if strings.Contains(name, CMSContainerName) {
 				fmt.Printf("🛑 Stopping container: %s\n", c.ID[:12])
 				if err := s.dockerClient.ContainerStop(context.Background(), c.ID, container.StopOptions{}); err != nil {
 					return fmt.Errorf("Failed to stop container: %v", err)
@@ -716,7 +718,8 @@ func (s *CMSStarter) getCMSStatus() (string, error) {
 
 	for _, c := range containers {
 		for _, name := range c.Names {
-			if strings.Contains(name, "cms-container") {
+			// Check for our specific CMS container
+			if strings.Contains(name, CMSContainerName) {
 				return c.State, nil
 			}
 		}
@@ -733,7 +736,8 @@ func (s *CMSStarter) stopExistingContainer() {
 
 	for _, c := range containers {
 		for _, name := range c.Names {
-			if strings.Contains(name, "cms-container") {
+			// Check for our specific CMS container
+			if strings.Contains(name, CMSContainerName) {
 				if verbose {
 					fmt.Printf("🛑 Stopping existing container: %s\n", c.ID[:12])
 				}
