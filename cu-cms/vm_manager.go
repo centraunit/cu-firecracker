@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 
@@ -16,20 +15,46 @@ func (vm *VMManager) StartVM(instanceID string, plugin *Plugin) error {
 	vm.mutex.Lock()
 	defer vm.mutex.Unlock()
 
+	logger.Info("Starting VM",
+		"instance_id", instanceID,
+		"plugin_id", plugin.ID,
+		"plugin_name", plugin.Name,
+		"rootfs_path", plugin.RootFSPath,
+		"kernel_path", vm.kernelPath,
+		"firecracker_path", vm.firecrackerPath,
+	)
+
 	// Create temporary directory for VM
 	vmDir := filepath.Join("/tmp", "firecracker-"+instanceID)
 	if err := os.MkdirAll(vmDir, 0755); err != nil {
+		logger.Error("Failed to create VM directory", "instance_id", instanceID, "path", vmDir, "error", err)
 		return fmt.Errorf("failed to create VM directory: %v", err)
 	}
 
+	logger.Debug("Created VM directory", "instance_id", instanceID, "path", vmDir)
+
 	// Create socket path
 	socketPath := filepath.Join(vmDir, "firecracker.sock")
+
+	// Check if rootfs file exists and is accessible
+	if _, err := os.Stat(plugin.RootFSPath); err != nil {
+		logger.Error("Rootfs file not accessible", "instance_id", instanceID, "path", plugin.RootFSPath, "error", err)
+		return fmt.Errorf("rootfs file not accessible: %v", err)
+	}
+
+	logger.Debug("Rootfs file verified", "instance_id", instanceID, "path", plugin.RootFSPath)
+
+	logger.Debug("Configuring Firecracker",
+		"instance_id", instanceID,
+		"socket_path", socketPath,
+		"kernel_args", "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw",
+	)
 
 	// Configure Firecracker
 	cfg := firecracker.Config{
 		SocketPath:      socketPath,
 		KernelImagePath: vm.kernelPath,
-		KernelArgs:      "console=ttyS0 reboot=k panic=1 pci=off",
+		KernelArgs:      "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw",
 		Drives: []models.Drive{
 			{
 				DriveID:      firecracker.String("1"),
@@ -42,7 +67,7 @@ func (vm *VMManager) StartVM(instanceID string, plugin *Plugin) error {
 			VcpuCount:  firecracker.Int64(1),
 			MemSizeMib: firecracker.Int64(128),
 		},
-		// Temporarily disabled networking for testing
+		// Temporarily disabled networking until CNI is properly configured
 		// NetworkInterfaces: []firecracker.NetworkInterface{
 		// 	{
 		// 		CNIConfiguration: &firecracker.CNIConfiguration{
@@ -53,21 +78,34 @@ func (vm *VMManager) StartVM(instanceID string, plugin *Plugin) error {
 		// },
 	}
 
+	logger.Debug("Creating Firecracker machine", "instance_id", instanceID)
+
 	// Create Firecracker machine
 	machine, err := firecracker.NewMachine(context.Background(), cfg)
 	if err != nil {
+		logger.Error("Failed to create Firecracker machine", "instance_id", instanceID, "error", err)
 		return fmt.Errorf("failed to create machine: %v", err)
 	}
 
+	logger.Debug("Starting Firecracker machine", "instance_id", instanceID)
+
 	// Start the machine
 	if err := machine.Start(context.Background()); err != nil {
+		logger.Error("Failed to start Firecracker machine", "instance_id", instanceID, "error", err)
 		return fmt.Errorf("failed to start machine: %v", err)
 	}
 
 	// Store the machine instance
 	vm.instances[instanceID] = machine
 
-	log.Printf("Started VM %s for plugin %s", instanceID, plugin.ID)
+	logger.Info("VM started successfully",
+		"instance_id", instanceID,
+		"plugin_id", plugin.ID,
+		"plugin_name", plugin.Name,
+		"vcpu_count", 1,
+		"memory_mib", 128,
+	)
+
 	return nil
 }
 
@@ -76,21 +114,29 @@ func (vm *VMManager) StopVM(instanceID string) error {
 	vm.mutex.Lock()
 	defer vm.mutex.Unlock()
 
+	logger.Info("Stopping VM", "instance_id", instanceID)
+
 	machine, exists := vm.instances[instanceID]
 	if !exists {
+		logger.Warn("VM instance not found for stopping", "instance_id", instanceID)
 		return fmt.Errorf("VM instance %s not found", instanceID)
 	}
 
+	logger.Debug("Shutting down Firecracker machine", "instance_id", instanceID)
+
 	// Shutdown the machine
 	if err := machine.Shutdown(context.Background()); err != nil {
+		logger.Error("Failed to shutdown Firecracker machine", "instance_id", instanceID, "error", err)
 		return fmt.Errorf("failed to shutdown machine: %v", err)
 	}
 
+	logger.Debug("Waiting for VM shutdown", "instance_id", instanceID)
+
 	// Wait for shutdown
 	if err := machine.Wait(context.Background()); err != nil {
-		log.Printf("VM %s shutdown error: %v", instanceID, err)
+		logger.Error("VM shutdown error", "instance_id", instanceID, "error", err)
 	} else {
-		log.Printf("VM %s shutdown completed", instanceID)
+		logger.Info("VM shutdown completed", "instance_id", instanceID)
 	}
 
 	// Clean up
@@ -99,8 +145,12 @@ func (vm *VMManager) StopVM(instanceID string) error {
 	// Clean up temporary directory
 	vmDir := filepath.Join("/tmp", "firecracker-"+instanceID)
 	if err := os.RemoveAll(vmDir); err != nil {
-		log.Printf("Failed to clean up VM directory %s: %v", vmDir, err)
+		logger.Error("Failed to clean up VM directory", "instance_id", instanceID, "path", vmDir, "error", err)
+	} else {
+		logger.Debug("Cleaned up VM directory", "instance_id", instanceID, "path", vmDir)
 	}
+
+	logger.Info("VM stopped successfully", "instance_id", instanceID)
 
 	return nil
 }
@@ -112,21 +162,24 @@ func (vm *VMManager) GetVMStatus(instanceID string) (string, error) {
 
 	_, exists := vm.instances[instanceID]
 	if !exists {
+		logger.Debug("VM instance not found for status check", "instance_id", instanceID)
 		return "not_found", nil
 	}
 
+	logger.Debug("VM instance found", "instance_id", instanceID, "status", "running")
 	return "running", nil
 }
 
-// ListVMs returns all running VM instances
+// ListVMs returns a list of running VM instance IDs
 func (vm *VMManager) ListVMs() []string {
 	vm.mutex.RLock()
 	defer vm.mutex.RUnlock()
 
-	instances := make([]string, 0, len(vm.instances))
+	instanceIDs := make([]string, 0, len(vm.instances))
 	for instanceID := range vm.instances {
-		instances = append(instances, instanceID)
+		instanceIDs = append(instanceIDs, instanceID)
 	}
 
-	return instances
+	logger.Debug("Listed VM instances", "count", len(instanceIDs), "instances", instanceIDs)
+	return instanceIDs
 }
