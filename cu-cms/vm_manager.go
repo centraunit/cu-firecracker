@@ -84,15 +84,15 @@ func (vm *VMManager) StartVM(instanceID string, plugin *Plugin) error {
 			VcpuCount:  firecracker.Int64(1),
 			MemSizeMib: firecracker.Int64(128),
 		},
-		// Enable networking for plugin communication using CNI
-		NetworkInterfaces: []firecracker.NetworkInterface{
-			{
-				CNIConfiguration: &firecracker.CNIConfiguration{
-					NetworkName: "fcnet",
-					IfName:      "veth0",
-				},
-			},
-		},
+		// Temporarily disable networking to test VM startup
+		// NetworkInterfaces: []firecracker.NetworkInterface{
+		// 	{
+		// 		CNIConfiguration: &firecracker.CNIConfiguration{
+		// 			NetworkName: "fcnet",
+		// 			IfName:      "veth0",
+		// 		},
+		// 	},
+		// },
 	}
 
 	logger.Debug("Creating Firecracker machine", "instance_id", instanceID)
