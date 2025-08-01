@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -121,7 +122,7 @@ func init() {
 
 	// Plugin build command flags
 	buildCmd.Flags().String("plugin", "", "Plugin directory path")
-	buildCmd.Flags().Int("size", 1000, "Filesystem size in MB (default: 1000)")
+	buildCmd.Flags().Int("size", 500, "Filesystem size in MB (default: 500)")
 	buildCmd.MarkFlagRequired("plugin")
 
 	// Add commands
@@ -335,6 +336,10 @@ func exportToExt4(imageName, outputPath string, sizeMB int) error {
 	// Connect the commands with a pipe
 	extractCmd.Stdin, _ = exportCmd.StdoutPipe()
 
+	// Capture stderr for debugging
+	var stderr bytes.Buffer
+	extractCmd.Stderr = &stderr
+
 	// Start the extract command
 	if err := extractCmd.Start(); err != nil {
 		return fmt.Errorf("failed to start extract command: %v", err)
@@ -347,7 +352,7 @@ func exportToExt4(imageName, outputPath string, sizeMB int) error {
 
 	// Wait for extract to complete
 	if err := extractCmd.Wait(); err != nil {
-		return fmt.Errorf("failed to extract to ext4: %v", err)
+		return fmt.Errorf("failed to extract to ext4: %v, stderr: %s", err, stderr.String())
 	}
 
 	fmt.Printf("Successfully created ext4 filesystem: %s\n", outputPath)
@@ -431,10 +436,13 @@ func (s *CMSStarter) Start() error {
 		return fmt.Errorf("Host setup failed: %v", err)
 	}
 
-	// Step 3: Create data directory
+	// Create data directory if it doesn't exist
 	if err := s.createDataDirectory(); err != nil {
-		return fmt.Errorf("Data directory creation failed: %v", err)
+		return fmt.Errorf("Failed to create data directory: %v", err)
 	}
+
+	// Stop any existing container
+	s.stopExistingContainer()
 
 	// Step 4: Start CMS container
 	if err := s.startCMSContainer(); err != nil {
@@ -538,6 +546,7 @@ func (s *CMSStarter) startCMSContainer() error {
 	// Create container configuration
 	containerConfig := &container.Config{
 		Image: CMSImageName,
+		// Run as root for Firecracker networking capabilities
 		ExposedPorts: nat.PortSet{
 			nat.Port(fmt.Sprintf("%d/tcp", s.port)): struct{}{},
 		},
@@ -580,11 +589,20 @@ func (s *CMSStarter) startCMSContainer() error {
 				Source: "/dev/kvm",
 				Target: "/dev/kvm",
 			},
+			{
+				Type:   mount.TypeBind,
+				Source: "/proc",
+				Target: "/proc",
+			},
 		},
-		Privileged: true, // Required for Firecracker
+		Privileged: true, // Required for network namespace mounting
 		CapAdd: []string{
-			"SYS_ADMIN", // Required for Firecracker
-			"NET_ADMIN",
+			"SYS_ADMIN", // Required for Firecracker and network namespace mounting
+			"NET_ADMIN", // Required for networking
+			"NET_RAW",   // Required for network namespace creation
+		},
+		SecurityOpt: []string{
+			"no-new-privileges", // Prevent privilege escalation
 		},
 	}
 

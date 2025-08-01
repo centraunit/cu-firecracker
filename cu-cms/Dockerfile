@@ -55,9 +55,27 @@ RUN mkdir -p /opt/cni/bin && \
     tar -xzf /opt/cni/bin/cni-plugins-linux-amd64-v1.7.1.tgz -C /opt/cni/bin && \
     rm /opt/cni/bin/cni-plugins-linux-amd64-v1.7.1.tgz
 
-# Set up CNI configuration
+# Build tc-redirect-tap plugin (required for Firecracker)
+RUN git clone https://github.com/awslabs/tc-redirect-tap.git /tmp/tc-redirect-tap && \
+    cd /tmp/tc-redirect-tap && \
+    make tc-redirect-tap && \
+    cp tc-redirect-tap /opt/cni/bin/ && \
+    chmod +x /opt/cni/bin/tc-redirect-tap && \
+    rm -rf /tmp/tc-redirect-tap
+
+# Install network tools
+RUN apt-get update && apt-get install -y \
+    iproute2 \
+    bridge-utils \
+    iptables \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set up CNI configuration for Firecracker VMs
 RUN mkdir -p /etc/cni/conf.d && \
-    echo '{"cniVersion":"0.4.0","name":"fcnet","type":"bridge","bridge":"fcbr0","isGateway":true,"ipMasq":true,"ipam":{"type":"host-local","subnet":"172.16.0.0/16","routes":[{"dst":"0.0.0.0/0"}]}}' > /etc/cni/conf.d/fcnet.conf
+    echo '{"name":"fcnet","cniVersion":"1.0.0","plugins":[{"type":"ptp","ipMasq":true,"ipam":{"type":"host-local","subnet":"172.16.0.0/16","resolvConf":"/etc/resolv.conf"}},{"type":"tc-redirect-tap"}]}' > /etc/cni/conf.d/fcnet.conflist
+
+# Add CNI bin to PATH
+ENV PATH=$PATH:/opt/cni/bin
 
 # Set up working directory
 WORKDIR /app
@@ -77,6 +95,14 @@ RUN go build -o cms .
 # Create necessary directories
 RUN mkdir -p /tmp/firecracker /var/lib/firecracker
 
+# Create network namespace directory for Firecracker
+RUN mkdir -p /var/run/netns && chmod 755 /var/run/netns
+
+# Create data directory with proper permissions for host user access
+RUN mkdir -p /app/data/logs && \
+    chmod 777 /app/data && \
+    chown -R 1000:1000 /app/data
+
 # Expose port
 EXPOSE 8080
 
@@ -84,5 +110,5 @@ EXPOSE 8080
 ENV FIRECRACKER_PATH=/usr/local/bin/firecracker
 ENV KERNEL_PATH=/opt/kernel/vmlinux
 
-# Run the CMS
+# Run the CMS as root (required for Firecracker networking)
 CMD ["./cms"] 

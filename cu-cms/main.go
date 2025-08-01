@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 
+	"os/exec"
+
 	"github.com/firecracker-microvm/firecracker-go-sdk"
 	"github.com/gorilla/mux"
 )
@@ -37,6 +39,11 @@ func setupLogger() error {
 		return fmt.Errorf("failed to open log file: %v", err)
 	}
 
+	// Fix ownership of the log file to match host user (1000:1000)
+	if err := fixLogFileOwnership(logFile); err != nil {
+		log.Printf("Warning: Failed to fix log file ownership: %v", err)
+	}
+
 	// Create multi-writer for both file and console
 	multiWriter := io.MultiWriter(os.Stdout, file)
 
@@ -59,6 +66,13 @@ func setupLogger() error {
 	)
 
 	return nil
+}
+
+// fixLogFileOwnership changes the ownership of the log file to the host user
+func fixLogFileOwnership(logFile string) error {
+	// Change ownership to UID 1000:GID 1000 (host user)
+	cmd := exec.Command("chown", "1000:1000", logFile)
+	return cmd.Run()
 }
 
 // Plugin represents a CMS plugin
@@ -570,8 +584,9 @@ func (cms *CMS) handleExecutePlugin(w http.ResponseWriter, r *http.Request) {
 
 	logger.Debug("VM started, waiting for boot", "instance_id", instanceID)
 
-	// Wait a moment for the VM to boot and plugin server to start
-	time.Sleep(5 * time.Second)
+	// Firecracker VMs start very quickly, no need for long waits
+	// Just a brief moment for the kernel to initialize
+	time.Sleep(500 * time.Millisecond)
 
 	// Make HTTP request to the plugin's server inside the microVM
 	// In a production environment, you'd get the VM's IP from the network setup
@@ -594,8 +609,11 @@ func (cms *CMS) handleExecutePlugin(w http.ResponseWriter, r *http.Request) {
 		"action", action,
 	)
 
-	// Make HTTP request to plugin
-	resp, err := http.Post(pluginURL, "application/json", bytes.NewBuffer(requestBodyBytes))
+	// Make HTTP request to plugin with increased timeout for plugin startup
+	client := &http.Client{
+		Timeout: 60 * time.Second, // Increased timeout to allow plugin startup
+	}
+	resp, err := client.Post(pluginURL, "application/json", bytes.NewBuffer(requestBodyBytes))
 	if err != nil {
 		logger.Error("Failed to communicate with plugin", "plugin_id", pluginID, "instance_id", instanceID, "error", err)
 
@@ -640,9 +658,8 @@ func (cms *CMS) handleExecutePlugin(w http.ResponseWriter, r *http.Request) {
 		"response_success", pluginResponse["success"],
 	)
 
-	// Stop the VM after execution
+	// Stop the VM after execution - no delay needed
 	go func() {
-		time.Sleep(2 * time.Second) // Give time for response to be sent
 		logger.Debug("Stopping VM after execution", "instance_id", instanceID)
 		if err := cms.vmManager.StopVM(instanceID); err != nil {
 			logger.Error("Failed to stop VM after execution", "instance_id", instanceID, "error", err)

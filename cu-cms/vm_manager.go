@@ -4,11 +4,23 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 
 	"github.com/firecracker-microvm/firecracker-go-sdk"
 	"github.com/firecracker-microvm/firecracker-go-sdk/client/models"
 )
+
+// cleanupCNIResources cleans up any leftover CNI resources
+func (vm *VMManager) cleanupCNIResources(instanceID string) {
+	// Try to clean up any leftover tap interfaces
+	cmd := exec.Command("ip", "link", "delete", "tap0")
+	cmd.Run() // Ignore errors as the interface might not exist
+
+	// Clean up CNI cache directory
+	cacheDir := fmt.Sprintf("/var/lib/cni/%s", instanceID)
+	os.RemoveAll(cacheDir)
+}
 
 // StartVM starts a new Firecracker microVM
 func (vm *VMManager) StartVM(instanceID string, plugin *Plugin) error {
@@ -23,6 +35,11 @@ func (vm *VMManager) StartVM(instanceID string, plugin *Plugin) error {
 		"kernel_path", vm.kernelPath,
 		"firecracker_path", vm.firecrackerPath,
 	)
+
+	// Clean up any leftover CNI resources
+	vm.cleanupCNIResources(instanceID)
+
+	// CNI will handle network interface creation automatically
 
 	// Create temporary directory for VM
 	vmDir := filepath.Join("/tmp", "firecracker-"+instanceID)
@@ -54,10 +71,10 @@ func (vm *VMManager) StartVM(instanceID string, plugin *Plugin) error {
 	cfg := firecracker.Config{
 		SocketPath:      socketPath,
 		KernelImagePath: vm.kernelPath,
-		KernelArgs:      "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw",
+		KernelArgs:      "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw init=/sbin/init",
 		Drives: []models.Drive{
 			{
-				DriveID:      firecracker.String("1"),
+				DriveID:      firecracker.String("0"),
 				PathOnHost:   firecracker.String(plugin.RootFSPath),
 				IsReadOnly:   firecracker.Bool(false),
 				IsRootDevice: firecracker.Bool(true),
@@ -67,15 +84,15 @@ func (vm *VMManager) StartVM(instanceID string, plugin *Plugin) error {
 			VcpuCount:  firecracker.Int64(1),
 			MemSizeMib: firecracker.Int64(128),
 		},
-		// Temporarily disabled networking until CNI is properly configured
-		// NetworkInterfaces: []firecracker.NetworkInterface{
-		// 	{
-		// 		CNIConfiguration: &firecracker.CNIConfiguration{
-		// 			NetworkName: "fcnet",
-		// 			IfName:      "veth0",
-		// 		},
-		// 	},
-		// },
+		// Enable networking for plugin communication using CNI
+		NetworkInterfaces: []firecracker.NetworkInterface{
+			{
+				CNIConfiguration: &firecracker.CNIConfiguration{
+					NetworkName: "fcnet",
+					IfName:      "veth0",
+				},
+			},
+		},
 	}
 
 	logger.Debug("Creating Firecracker machine", "instance_id", instanceID)
