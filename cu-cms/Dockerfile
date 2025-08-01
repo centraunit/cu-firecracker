@@ -70,7 +70,7 @@ RUN apt-get update && apt-get install -y \
 
 # Set up CNI configuration for Firecracker VMs
 RUN mkdir -p /etc/cni/conf.d && \
-    echo '{"name":"fcnet","cniVersion":"1.0.0","plugins":[{"type":"ptp","ipMasq":true,"ipam":{"type":"host-local","subnet":"192.168.127.0/24","resolvConf":"/etc/resolv.conf"}},{"type":"firewall"},{"type":"tc-redirect-tap"}]}' > /etc/cni/conf.d/fcnet.conflist
+    echo '{"name":"fcnet","cniVersion":"1.0.0","plugins":[{"type":"ptp","ipMasq":true,"ipam":{"type":"host-local","subnet":"192.168.127.0/24","resolvConf":"/etc/resolv.conf"}},{"type":"tc-redirect-tap"}]}' > /etc/cni/conf.d/fcnet.conflist
 
 # Add CNI bin to PATH
 ENV PATH=$PATH:/opt/cni/bin
