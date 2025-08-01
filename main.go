@@ -16,7 +16,7 @@ import (
 	"github.com/gorilla/mux"
 )
 
-// Plugin represents a CRM plugin
+// Plugin represents a CMS plugin
 type Plugin struct {
 	ID          string    `json:"id"`
 	Name        string    `json:"name"`
@@ -36,8 +36,8 @@ type VMInstance struct {
 	IP        string    `json:"ip,omitempty"`
 }
 
-// CRM represents the main CRM application
-type CRM struct {
+// CMS represents the main CMS application
+type CMS struct {
 	plugins   map[string]*Plugin
 	instances map[string]*VMInstance
 	mutex     sync.RWMutex
@@ -52,18 +52,18 @@ type VMManager struct {
 	mutex           sync.RWMutex
 }
 
-// NewCRM creates a new CRM instance
-func NewCRM() *CRM {
-	crm := &CRM{
+// NewCMS creates a new CMS instance
+func NewCMS() *CMS {
+	cms := &CMS{
 		plugins:   make(map[string]*Plugin),
 		instances: make(map[string]*VMInstance),
 		vmManager: NewVMManager(),
 	}
 
 	// Load existing plugins from disk
-	crm.loadPlugins()
+	cms.loadPlugins()
 
-	return crm
+	return cms
 }
 
 // NewVMManager creates a new VM manager
@@ -85,42 +85,42 @@ func NewVMManager() *VMManager {
 	}
 }
 
-// Start starts the CRM web server
-func (crm *CRM) Start(port string) error {
+// Start starts the CMS web server
+func (cms *CMS) Start(port string) error {
 	r := mux.NewRouter()
 
 	// Plugin management endpoints
-	r.HandleFunc("/api/plugins", crm.handleListPlugins).Methods("GET")
-	r.HandleFunc("/api/plugins", crm.handleUploadPlugin).Methods("POST")
-	r.HandleFunc("/api/plugins/{id}", crm.handleGetPlugin).Methods("GET")
-	r.HandleFunc("/api/plugins/{id}", crm.handleDeletePlugin).Methods("DELETE")
+	r.HandleFunc("/api/plugins", cms.handleListPlugins).Methods("GET")
+	r.HandleFunc("/api/plugins", cms.handleUploadPlugin).Methods("POST")
+	r.HandleFunc("/api/plugins/{id}", cms.handleGetPlugin).Methods("GET")
+	r.HandleFunc("/api/plugins/{id}", cms.handleDeletePlugin).Methods("DELETE")
 
 	// VM instance endpoints
-	r.HandleFunc("/api/instances", crm.handleListInstances).Methods("GET")
-	r.HandleFunc("/api/instances", crm.handleCreateInstance).Methods("POST")
-	r.HandleFunc("/api/instances/{id}", crm.handleGetInstance).Methods("GET")
-	r.HandleFunc("/api/instances/{id}", crm.handleDeleteInstance).Methods("DELETE")
+	r.HandleFunc("/api/instances", cms.handleListInstances).Methods("GET")
+	r.HandleFunc("/api/instances", cms.handleCreateInstance).Methods("POST")
+	r.HandleFunc("/api/instances/{id}", cms.handleGetInstance).Methods("GET")
+	r.HandleFunc("/api/instances/{id}", cms.handleDeleteInstance).Methods("DELETE")
 
 	// Plugin execution endpoint
-	r.HandleFunc("/api/plugins/{id}/execute", crm.handleExecutePlugin).Methods("POST")
+	r.HandleFunc("/api/plugins/{id}/execute", cms.handleExecutePlugin).Methods("POST")
 
 	// Health check
 	r.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("CRM is running"))
+		w.Write([]byte("CMS is running"))
 	}).Methods("GET")
 
-	log.Printf("Starting CRM server on port %s", port)
+	log.Printf("Starting CMS server on port %s", port)
 	return http.ListenAndServe(":"+port, r)
 }
 
 // handleListPlugins returns all registered plugins
-func (crm *CRM) handleListPlugins(w http.ResponseWriter, r *http.Request) {
-	crm.mutex.RLock()
-	defer crm.mutex.RUnlock()
+func (cms *CMS) handleListPlugins(w http.ResponseWriter, r *http.Request) {
+	cms.mutex.RLock()
+	defer cms.mutex.RUnlock()
 
-	plugins := make([]*Plugin, 0, len(crm.plugins))
-	for _, plugin := range crm.plugins {
+	plugins := make([]*Plugin, 0, len(cms.plugins))
+	for _, plugin := range cms.plugins {
 		plugins = append(plugins, plugin)
 	}
 
@@ -129,7 +129,7 @@ func (crm *CRM) handleListPlugins(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleUploadPlugin handles plugin upload and registration
-func (crm *CRM) handleUploadPlugin(w http.ResponseWriter, r *http.Request) {
+func (cms *CMS) handleUploadPlugin(w http.ResponseWriter, r *http.Request) {
 	// Parse multipart form
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
 		http.Error(w, "Failed to parse form", http.StatusBadRequest)
@@ -154,7 +154,7 @@ func (crm *CRM) handleUploadPlugin(w http.ResponseWriter, r *http.Request) {
 	defer file.Close()
 
 	// Create plugins directory if it doesn't exist
-	pluginsDir := "./plugins"
+	pluginsDir := "/app/data/plugins"
 	if err := os.MkdirAll(pluginsDir, 0755); err != nil {
 		http.Error(w, "Failed to create plugins directory", http.StatusInternalServerError)
 		return
@@ -182,17 +182,17 @@ func (crm *CRM) handleUploadPlugin(w http.ResponseWriter, r *http.Request) {
 		Name:        name,
 		Description: description,
 		RootFSPath:  rootfsPath,
-		KernelPath:  crm.vmManager.kernelPath,
+		KernelPath:  cms.vmManager.kernelPath,
 		CreatedAt:   time.Now(),
 		Status:      "ready",
 	}
 
-	crm.mutex.Lock()
-	crm.plugins[pluginID] = plugin
-	crm.mutex.Unlock()
+	cms.mutex.Lock()
+	cms.plugins[pluginID] = plugin
+	cms.mutex.Unlock()
 
 	// Save plugins to disk
-	if err := crm.savePlugins(); err != nil {
+	if err := cms.savePlugins(); err != nil {
 		log.Printf("Failed to save plugins: %v", err)
 	}
 
@@ -202,13 +202,13 @@ func (crm *CRM) handleUploadPlugin(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleGetPlugin returns a specific plugin
-func (crm *CRM) handleGetPlugin(w http.ResponseWriter, r *http.Request) {
+func (cms *CMS) handleGetPlugin(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	pluginID := vars["id"]
 
-	crm.mutex.RLock()
-	plugin, exists := crm.plugins[pluginID]
-	crm.mutex.RUnlock()
+	cms.mutex.RLock()
+	plugin, exists := cms.plugins[pluginID]
+	cms.mutex.RUnlock()
 
 	if !exists {
 		http.Error(w, "Plugin not found", http.StatusNotFound)
@@ -220,14 +220,14 @@ func (crm *CRM) handleGetPlugin(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleDeletePlugin deletes a plugin
-func (crm *CRM) handleDeletePlugin(w http.ResponseWriter, r *http.Request) {
+func (cms *CMS) handleDeletePlugin(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	pluginID := vars["id"]
 
-	crm.mutex.Lock()
-	defer crm.mutex.Unlock()
+	cms.mutex.Lock()
+	defer cms.mutex.Unlock()
 
-	plugin, exists := crm.plugins[pluginID]
+	plugin, exists := cms.plugins[pluginID]
 	if !exists {
 		http.Error(w, "Plugin not found", http.StatusNotFound)
 		return
@@ -238,10 +238,10 @@ func (crm *CRM) handleDeletePlugin(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Failed to remove rootfs file: %v", err)
 	}
 
-	delete(crm.plugins, pluginID)
+	delete(cms.plugins, pluginID)
 
 	// Save plugins to disk
-	if err := crm.savePlugins(); err != nil {
+	if err := cms.savePlugins(); err != nil {
 		log.Printf("Failed to save plugins: %v", err)
 	}
 
@@ -249,12 +249,12 @@ func (crm *CRM) handleDeletePlugin(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleListInstances returns all VM instances
-func (crm *CRM) handleListInstances(w http.ResponseWriter, r *http.Request) {
-	crm.mutex.RLock()
-	defer crm.mutex.RUnlock()
+func (cms *CMS) handleListInstances(w http.ResponseWriter, r *http.Request) {
+	cms.mutex.RLock()
+	defer cms.mutex.RUnlock()
 
-	instances := make([]*VMInstance, 0, len(crm.instances))
-	for _, instance := range crm.instances {
+	instances := make([]*VMInstance, 0, len(cms.instances))
+	for _, instance := range cms.instances {
 		instances = append(instances, instance)
 	}
 
@@ -263,7 +263,7 @@ func (crm *CRM) handleListInstances(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleCreateInstance creates a new VM instance
-func (crm *CRM) handleCreateInstance(w http.ResponseWriter, r *http.Request) {
+func (cms *CMS) handleCreateInstance(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		PluginID string `json:"plugin_id"`
 	}
@@ -273,9 +273,9 @@ func (crm *CRM) handleCreateInstance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	crm.mutex.RLock()
-	plugin, exists := crm.plugins[req.PluginID]
-	crm.mutex.RUnlock()
+	cms.mutex.RLock()
+	plugin, exists := cms.plugins[req.PluginID]
+	cms.mutex.RUnlock()
 
 	if !exists {
 		http.Error(w, "Plugin not found", http.StatusNotFound)
@@ -292,21 +292,21 @@ func (crm *CRM) handleCreateInstance(w http.ResponseWriter, r *http.Request) {
 
 	// Start VM in background
 	go func() {
-		if err := crm.vmManager.StartVM(instanceID, plugin); err != nil {
+		if err := cms.vmManager.StartVM(instanceID, plugin); err != nil {
 			log.Printf("Failed to start VM %s: %v", instanceID, err)
-			crm.mutex.Lock()
+			cms.mutex.Lock()
 			instance.Status = "failed"
-			crm.mutex.Unlock()
+			cms.mutex.Unlock()
 		} else {
-			crm.mutex.Lock()
+			cms.mutex.Lock()
 			instance.Status = "running"
-			crm.mutex.Unlock()
+			cms.mutex.Unlock()
 		}
 	}()
 
-	crm.mutex.Lock()
-	crm.instances[instanceID] = instance
-	crm.mutex.Unlock()
+	cms.mutex.Lock()
+	cms.instances[instanceID] = instance
+	cms.mutex.Unlock()
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -314,13 +314,13 @@ func (crm *CRM) handleCreateInstance(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleGetInstance returns a specific VM instance
-func (crm *CRM) handleGetInstance(w http.ResponseWriter, r *http.Request) {
+func (cms *CMS) handleGetInstance(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	instanceID := vars["id"]
 
-	crm.mutex.RLock()
-	instance, exists := crm.instances[instanceID]
-	crm.mutex.RUnlock()
+	cms.mutex.RLock()
+	instance, exists := cms.instances[instanceID]
+	cms.mutex.RUnlock()
 
 	if !exists {
 		http.Error(w, "Instance not found", http.StatusNotFound)
@@ -332,22 +332,22 @@ func (crm *CRM) handleGetInstance(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleDeleteInstance stops and deletes a VM instance
-func (crm *CRM) handleDeleteInstance(w http.ResponseWriter, r *http.Request) {
+func (cms *CMS) handleDeleteInstance(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	instanceID := vars["id"]
 
-	crm.mutex.Lock()
-	_, exists := crm.instances[instanceID]
+	cms.mutex.Lock()
+	_, exists := cms.instances[instanceID]
 	if !exists {
-		crm.mutex.Unlock()
+		cms.mutex.Unlock()
 		http.Error(w, "Instance not found", http.StatusNotFound)
 		return
 	}
-	delete(crm.instances, instanceID)
-	crm.mutex.Unlock()
+	delete(cms.instances, instanceID)
+	cms.mutex.Unlock()
 
 	// Stop VM
-	if err := crm.vmManager.StopVM(instanceID); err != nil {
+	if err := cms.vmManager.StopVM(instanceID); err != nil {
 		log.Printf("Failed to stop VM %s: %v", instanceID, err)
 	}
 
@@ -355,13 +355,13 @@ func (crm *CRM) handleDeleteInstance(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleExecutePlugin executes a plugin via HTTP request to the microVM
-func (crm *CRM) handleExecutePlugin(w http.ResponseWriter, r *http.Request) {
+func (cms *CMS) handleExecutePlugin(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	pluginID := vars["id"]
 
-	crm.mutex.RLock()
-	plugin, exists := crm.plugins[pluginID]
-	crm.mutex.RUnlock()
+	cms.mutex.RLock()
+	plugin, exists := cms.plugins[pluginID]
+	cms.mutex.RUnlock()
 
 	if !exists {
 		http.Error(w, "Plugin not found", http.StatusNotFound)
@@ -383,7 +383,7 @@ func (crm *CRM) handleExecutePlugin(w http.ResponseWriter, r *http.Request) {
 	instanceID := generateID()
 
 	// Start the Firecracker microVM
-	if err := crm.vmManager.StartVM(instanceID, plugin); err != nil {
+	if err := cms.vmManager.StartVM(instanceID, plugin); err != nil {
 		log.Printf("Failed to start VM for plugin execution: %v", err)
 		http.Error(w, "Failed to start plugin VM", http.StatusInternalServerError)
 		return
@@ -411,22 +411,10 @@ func (crm *CRM) handleExecutePlugin(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Failed to communicate with plugin: %v", err)
 		// Return a simulated response for demo purposes
 		pluginResponse := map[string]interface{}{
-			"success": true,
-			"action":  action,
-			"message": fmt.Sprintf("Plugin '%s' executed action '%s' (simulated - VM networking not fully configured)", plugin.Name, action),
-			"data": map[string]interface{}{
-				"customers": []map[string]interface{}{
-					{"id": 1, "name": "John Doe", "email": "john@example.com", "status": "active"},
-					{"id": 2, "name": "Jane Smith", "email": "jane@example.com", "status": "active"},
-					{"id": 3, "name": "Bob Johnson", "email": "bob@example.com", "status": "inactive"},
-				},
-				"analytics": map[string]interface{}{
-					"totalCustomers":    3,
-					"activeCustomers":   2,
-					"inactiveCustomers": 1,
-					"lastUpdated":       time.Now().Format(time.RFC3339),
-				},
-			},
+			"success":   false,
+			"action":    action,
+			"message":   fmt.Sprintf("Plugin '%s' failed to execute action '%s'", plugin.Name, action),
+			"data":      map[string]interface{}{},
 			"timestamp": time.Now().Format(time.RFC3339),
 		}
 
@@ -452,7 +440,7 @@ func (crm *CRM) handleExecutePlugin(w http.ResponseWriter, r *http.Request) {
 	// Stop the VM after execution
 	go func() {
 		time.Sleep(2 * time.Second) // Give time for response to be sent
-		if err := crm.vmManager.StopVM(instanceID); err != nil {
+		if err := cms.vmManager.StopVM(instanceID); err != nil {
 			log.Printf("Failed to stop VM %s: %v", instanceID, err)
 		}
 	}()
@@ -469,17 +457,17 @@ func (crm *CRM) handleExecutePlugin(w http.ResponseWriter, r *http.Request) {
 
 // generateID generates a unique ID
 // savePlugins saves plugins to disk
-func (crm *CRM) savePlugins() error {
-	crm.mutex.RLock()
-	defer crm.mutex.RUnlock()
+func (cms *CMS) savePlugins() error {
+	cms.mutex.RLock()
+	defer cms.mutex.RUnlock()
 
-	pluginsDir := "./plugins"
+	pluginsDir := "/app/data/plugins"
 	if err := os.MkdirAll(pluginsDir, 0755); err != nil {
 		return err
 	}
 
 	pluginsFile := filepath.Join(pluginsDir, "plugins.json")
-	data, err := json.MarshalIndent(crm.plugins, "", "  ")
+	data, err := json.MarshalIndent(cms.plugins, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -488,8 +476,8 @@ func (crm *CRM) savePlugins() error {
 }
 
 // loadPlugins loads plugins from disk
-func (crm *CRM) loadPlugins() {
-	pluginsFile := "./plugins/plugins.json"
+func (cms *CMS) loadPlugins() {
+	pluginsFile := "/app/data/plugins/plugins.json"
 	data, err := os.ReadFile(pluginsFile)
 	if err != nil {
 		log.Printf("No existing plugins found: %v", err)
@@ -502,9 +490,9 @@ func (crm *CRM) loadPlugins() {
 		return
 	}
 
-	crm.mutex.Lock()
-	defer crm.mutex.Unlock()
-	crm.plugins = plugins
+	cms.mutex.Lock()
+	defer cms.mutex.Unlock()
+	cms.plugins = plugins
 	log.Printf("Loaded %d plugins from disk", len(plugins))
 }
 
@@ -513,14 +501,14 @@ func generateID() string {
 }
 
 func main() {
-	crm := NewCRM()
+	cms := NewCMS()
 
-	port := os.Getenv("CRM_PORT")
+	port := os.Getenv("CMS_PORT")
 	if port == "" {
 		port = "8080"
 	}
 
-	if err := crm.Start(port); err != nil {
+	if err := cms.Start(port); err != nil {
 		log.Fatal(err)
 	}
 }

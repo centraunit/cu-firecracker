@@ -1,6 +1,6 @@
 {
-  "name": "python-crm-plugin",
+  "name": "python-cms-plugin",
   "version": "1.0.0",
   "port": 8080,
-  "description": "A Python CRM plugin example"
+  "description": "A Python CMS plugin example"
 } 

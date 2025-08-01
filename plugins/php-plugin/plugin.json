@@ -1,6 +1,6 @@
 {
-  "name": "php-crm-plugin",
+  "name": "php-cms-plugin",
   "version": "1.0.0",
   "port": 8080,
-  "description": "A PHP CRM plugin example"
+  "description": "A PHP CMS plugin example"
 } 

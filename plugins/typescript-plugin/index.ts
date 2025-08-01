@@ -10,7 +10,7 @@ const port = 8080;
 app.use(express.json());
 
 // Data file path
-const DATA_FILE = '/tmp/crm_data.json';
+const DATA_FILE = '/tmp/cms_data.json';
 
 // Interface definitions
 interface Customer {
@@ -34,14 +34,14 @@ interface Analytics {
     averageCustomerAge: number;
 }
 
-interface CRMData {
+interface CMSData {
     customers: Customer[];
     analytics: Analytics;
     lastCustomerId: number;
 }
 
 // Initialize data store
-let crmData: CRMData = {
+let cmsData: CMSData = {
     customers: [
         { 
             id: 1, 
@@ -90,7 +90,7 @@ let crmData: CRMData = {
 // Data persistence functions
 function saveData(): void {
     try {
-        fs.writeFileSync(DATA_FILE, JSON.stringify(crmData, null, 2));
+        fs.writeFileSync(DATA_FILE, JSON.stringify(cmsData, null, 2));
     } catch (error) {
         console.error('Failed to save data:', error);
     }
@@ -100,7 +100,7 @@ function loadData(): void {
     try {
         if (fs.existsSync(DATA_FILE)) {
             const data = fs.readFileSync(DATA_FILE, 'utf8');
-            crmData = JSON.parse(data);
+            cmsData = JSON.parse(data);
             updateAnalytics();
         }
     } catch (error) {
@@ -113,26 +113,26 @@ function updateAnalytics(): void {
     const thisMonth = now.getMonth();
     const thisYear = now.getFullYear();
     
-    crmData.analytics.totalCustomers = crmData.customers.length;
-    crmData.analytics.activeCustomers = crmData.customers.filter(c => c.status === 'active').length;
-    crmData.analytics.inactiveCustomers = crmData.customers.filter(c => c.status === 'inactive').length;
-    crmData.analytics.lastUpdated = now.toISOString();
+    cmsData.analytics.totalCustomers = cmsData.customers.length;
+    cmsData.analytics.activeCustomers = cmsData.customers.filter(c => c.status === 'active').length;
+    cmsData.analytics.inactiveCustomers = cmsData.customers.filter(c => c.status === 'inactive').length;
+    cmsData.analytics.lastUpdated = now.toISOString();
     
     // Calculate new customers this month
-    crmData.analytics.newCustomersThisMonth = crmData.customers.filter(c => {
+    cmsData.analytics.newCustomersThisMonth = cmsData.customers.filter(c => {
         const created = new Date(c.createdAt);
         return created.getMonth() === thisMonth && created.getFullYear() === thisYear;
     }).length;
     
     // Calculate average customer age (days since creation)
-    const totalAge = crmData.customers.reduce((sum, customer) => {
+    const totalAge = cmsData.customers.reduce((sum, customer) => {
         const created = new Date(customer.createdAt);
         const ageInDays = Math.floor((now.getTime() - created.getTime()) / (1000 * 60 * 60 * 24));
         return sum + ageInDays;
     }, 0);
     
-    crmData.analytics.averageCustomerAge = crmData.customers.length > 0 
-        ? Math.round(totalAge / crmData.customers.length) 
+    cmsData.analytics.averageCustomerAge = cmsData.customers.length > 0 
+        ? Math.round(totalAge / cmsData.customers.length) 
         : 0;
 }
 
@@ -144,7 +144,7 @@ app.get('/health', (req: Request, res: Response) => {
     res.json({
         status: 'healthy',
         timestamp: new Date().toISOString(),
-        plugin: 'typescript-crm-plugin',
+        plugin: 'typescript-cms-plugin',
         version: '2.0.0',
         uptime: process.uptime(),
         memory: process.memoryUsage(),
@@ -155,9 +155,9 @@ app.get('/health', (req: Request, res: Response) => {
 // Main plugin info
 app.get('/', (req: Request, res: Response) => {
     res.json({
-        name: 'TypeScript CRM Plugin v2',
+        name: 'TypeScript CMS Plugin v2',
         version: '2.0.0',
-        description: 'A production-ready TypeScript CRM plugin with customer management',
+        description: 'A production-ready TypeScript CMS plugin with customer management',
         endpoints: [
             'GET  /health',
             'GET  /',
@@ -182,7 +182,7 @@ app.get('/', (req: Request, res: Response) => {
 // Get all customers with optional filtering
 app.get('/customers', (req: Request, res: Response) => {
     const { status, company, tag } = req.query;
-    let filteredCustomers = [...crmData.customers];
+    let filteredCustomers = [...cmsData.customers];
     
     if (status) {
         filteredCustomers = filteredCustomers.filter(c => c.status === status);
@@ -200,7 +200,7 @@ app.get('/customers', (req: Request, res: Response) => {
         success: true,
         data: filteredCustomers,
         count: filteredCustomers.length,
-        total: crmData.customers.length,
+        total: cmsData.customers.length,
         timestamp: new Date().toISOString()
     });
 });
@@ -208,7 +208,7 @@ app.get('/customers', (req: Request, res: Response) => {
 // Get customer by ID
 app.get('/customers/:id', (req: Request, res: Response) => {
     const id = parseInt(req.params.id);
-    const customer = crmData.customers.find(c => c.id === id);
+    const customer = cmsData.customers.find(c => c.id === id);
     
     if (!customer) {
         return res.status(404).json({
@@ -237,7 +237,7 @@ app.post('/customers', (req: Request, res: Response) => {
     }
     
     // Check if email already exists
-    if (crmData.customers.find(c => c.email === email)) {
+    if (cmsData.customers.find(c => c.email === email)) {
         return res.status(409).json({
             success: false,
             error: 'Customer with this email already exists'
@@ -246,7 +246,7 @@ app.post('/customers', (req: Request, res: Response) => {
     
     const now = new Date().toISOString();
     const newCustomer: Customer = {
-        id: ++crmData.lastCustomerId,
+        id: ++cmsData.lastCustomerId,
         name,
         email,
         status,
@@ -257,7 +257,7 @@ app.post('/customers', (req: Request, res: Response) => {
         tags: tags || []
     };
     
-    crmData.customers.push(newCustomer);
+    cmsData.customers.push(newCustomer);
     updateAnalytics();
     saveData();
     
@@ -272,7 +272,7 @@ app.post('/customers', (req: Request, res: Response) => {
 // Update customer
 app.put('/customers/:id', (req: Request, res: Response) => {
     const id = parseInt(req.params.id);
-    const customerIndex = crmData.customers.findIndex(c => c.id === id);
+    const customerIndex = cmsData.customers.findIndex(c => c.id === id);
     
     if (customerIndex === -1) {
         return res.status(404).json({
@@ -284,7 +284,7 @@ app.put('/customers/:id', (req: Request, res: Response) => {
     
     const { name, email, status, phone, company, tags } = req.body;
     const updatedCustomer = {
-        ...crmData.customers[customerIndex],
+        ...cmsData.customers[customerIndex],
         ...(name && { name }),
         ...(email && { email }),
         ...(status && { status }),
@@ -294,7 +294,7 @@ app.put('/customers/:id', (req: Request, res: Response) => {
         updatedAt: new Date().toISOString()
     };
     
-    crmData.customers[customerIndex] = updatedCustomer;
+    cmsData.customers[customerIndex] = updatedCustomer;
     updateAnalytics();
     saveData();
     
@@ -309,7 +309,7 @@ app.put('/customers/:id', (req: Request, res: Response) => {
 // Delete customer
 app.delete('/customers/:id', (req: Request, res: Response) => {
     const id = parseInt(req.params.id);
-    const customerIndex = crmData.customers.findIndex(c => c.id === id);
+    const customerIndex = cmsData.customers.findIndex(c => c.id === id);
     
     if (customerIndex === -1) {
         return res.status(404).json({
@@ -319,7 +319,7 @@ app.delete('/customers/:id', (req: Request, res: Response) => {
         });
     }
     
-    const deletedCustomer = crmData.customers.splice(customerIndex, 1)[0];
+    const deletedCustomer = cmsData.customers.splice(customerIndex, 1)[0];
     updateAnalytics();
     saveData();
     
@@ -335,7 +335,7 @@ app.delete('/customers/:id', (req: Request, res: Response) => {
 app.get('/analytics', (req: Request, res: Response) => {
     res.json({
         success: true,
-        data: crmData.analytics,
+        data: cmsData.analytics,
         timestamp: new Date().toISOString()
     });
 });
@@ -352,8 +352,8 @@ app.post('/execute', (req: Request, res: Response) => {
             res.json({
                 success: true,
                 action: 'get_customers',
-                    data: crmData.customers,
-                    count: crmData.customers.length,
+                    data: cmsData.customers,
+                    count: cmsData.customers.length,
                 timestamp: new Date().toISOString()
             });
             break;
@@ -367,7 +367,7 @@ app.post('/execute', (req: Request, res: Response) => {
             }
             
                 // Check if email already exists
-                if (crmData.customers.find(c => c.email === data.email)) {
+                if (cmsData.customers.find(c => c.email === data.email)) {
                     return res.status(409).json({
                         success: false,
                         error: 'Customer with this email already exists'
@@ -376,7 +376,7 @@ app.post('/execute', (req: Request, res: Response) => {
                 
                 const now = new Date().toISOString();
                 const newCustomer: Customer = {
-                    id: ++crmData.lastCustomerId,
+                    id: ++cmsData.lastCustomerId,
                 name: data.name,
                 email: data.email,
                     status: data.status || 'active',
@@ -387,7 +387,7 @@ app.post('/execute', (req: Request, res: Response) => {
                     tags: data.tags || []
                 };
                 
-                crmData.customers.push(newCustomer);
+                cmsData.customers.push(newCustomer);
                 updateAnalytics();
                 saveData();
             
@@ -404,14 +404,14 @@ app.post('/execute', (req: Request, res: Response) => {
             res.json({
                 success: true,
                 action: 'get_analytics',
-                    data: crmData.analytics,
+                    data: cmsData.analytics,
                     timestamp: new Date().toISOString()
                 });
                 break;
                 
             case 'search_customers':
                 const { query, status, company } = data || {};
-                let searchResults = [...crmData.customers];
+                let searchResults = [...cmsData.customers];
                 
                 if (query) {
                     const searchTerm = query.toLowerCase();
@@ -444,7 +444,7 @@ app.post('/execute', (req: Request, res: Response) => {
                 
             case 'get_customer_by_id':
                 const customerId = parseInt(data?.id);
-                const customer = crmData.customers.find(c => c.id === customerId);
+                const customer = cmsData.customers.find(c => c.id === customerId);
                 
                 if (!customer) {
                     return res.status(404).json({
@@ -465,7 +465,7 @@ app.post('/execute', (req: Request, res: Response) => {
                 
             case 'update_customer':
                 const updateId = parseInt(data?.id);
-                const updateIndex = crmData.customers.findIndex(c => c.id === updateId);
+                const updateIndex = cmsData.customers.findIndex(c => c.id === updateId);
                 
                 if (updateIndex === -1) {
                     return res.status(404).json({
@@ -477,7 +477,7 @@ app.post('/execute', (req: Request, res: Response) => {
                 }
                 
                 const updatedCustomer = {
-                    ...crmData.customers[updateIndex],
+                    ...cmsData.customers[updateIndex],
                     ...(data.name && { name: data.name }),
                     ...(data.email && { email: data.email }),
                     ...(data.status && { status: data.status }),
@@ -487,7 +487,7 @@ app.post('/execute', (req: Request, res: Response) => {
                     updatedAt: new Date().toISOString()
                 };
                 
-                crmData.customers[updateIndex] = updatedCustomer;
+                cmsData.customers[updateIndex] = updatedCustomer;
                 updateAnalytics();
                 saveData();
                 
@@ -526,7 +526,7 @@ app.post('/execute', (req: Request, res: Response) => {
 
 // Start the server
 app.listen(port, '0.0.0.0', () => {
-    console.log(`TypeScript CRM Plugin v2 running on port ${port}`);
+    console.log(`TypeScript CMS Plugin v2 running on port ${port}`);
     console.log(`Data persistence: ${DATA_FILE}`);
     console.log(`Available endpoints:`);
     console.log(`  GET  /health`);

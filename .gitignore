@@ -4,6 +4,12 @@
 *.dll
 *.so
 *.dylib
+*.log
+# all files inside the bin directory
+bin/cms-plugin-builder
+# all files inside the build directory
+build/*
+
 
 # Test binary, built with `go test -c`
 *.test
@@ -22,7 +28,7 @@ go.work
 .idea/
 
 # OS generated files
-.DS_Store
+.DS_Store   
 .DS_Store?
 ._*
 .Spotlight-V100

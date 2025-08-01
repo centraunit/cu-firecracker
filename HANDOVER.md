@@ -1,14 +1,14 @@
-# CRM Plugin System Handover Document
+# CMS Plugin System Handover Document
 
 ## Project Overview
 
-This is a Go-based CRM system with a plugin architecture using AWS Firecracker microVMs. The system allows developers to create plugins in any language, compile them into `rootfs.ext4` files, and run them in isolated microVMs with HTTP communication.
+This is a Go-based CMS system with a plugin architecture using AWS Firecracker microVMs. The system allows developers to create plugins in any language, compile them into `rootfs.ext4` files, and run them in isolated microVMs with HTTP communication.
 
 ## System Architecture
 
 ### Core Components
 
-1. **CRM Web Application** (`main.go`, `vm_manager.go`)
+1. **CMS Web Application** (`main.go`, `vm_manager.go`)
    - HTTP server exposing REST API endpoints
    - Plugin management (upload, list, delete)
    - VM instance management (create, list, delete)
@@ -25,7 +25,7 @@ This is a Go-based CRM system with a plugin architecture using AWS Firecracker m
    - TypeScript plugin with Express.js server
    - Python plugin with Flask server
    - PHP plugin with built-in server
-   - Each plugin exposes HTTP endpoints for CRM interaction
+   - Each plugin exposes HTTP endpoints for CMS interaction
 
 ### Plugin System Flow
 
@@ -41,9 +41,9 @@ Plugin Developer:
    - Exports container as rootfs.ext4
    - Creates build/rootfs.ext4
 
-3. Uploads rootfs.ext4 to CRM
+3. Uploads rootfs.ext4 to CMS
 
-CRM System:
+CMS System:
 1. Receives rootfs.ext4 via HTTP API
 2. Stores plugin metadata and filesystem
 3. Creates Firecracker microVM with rootfs
@@ -55,7 +55,7 @@ CRM System:
 
 ### ✅ Completed Features
 
-1. **CRM Web Application**
+1. **CMS Web Application**
    - HTTP server with REST API endpoints
    - Plugin upload, listing, deletion
    - VM instance creation and management
@@ -76,7 +76,7 @@ CRM System:
    - All plugins expose /health, /, /execute endpoints
 
 4. **Docker Integration**
-   - CRM runs in Docker container with Firecracker
+   - CMS runs in Docker container with Firecracker
    - Linux kernel built from source (v6.6.99)
    - CNI networking plugins installed
    - KVM device mounted for virtualization
@@ -96,7 +96,7 @@ CRM System:
 2. **Plugin Communication**
    - Hardcoded IP addresses in execute handler
    - Need dynamic IP assignment from Firecracker
-   - HTTP communication between CRM and plugins
+   - HTTP communication between CMS and plugins
 
 ### ❌ Known Issues
 
@@ -180,13 +180,13 @@ Plugins must expose these HTTP endpoints:
 
 ### Build and Run
 ```bash
-# Build CRM
+# Build CMS
 make build
 
 # Build CLI tool
 make build-cli
 
-# Run CRM in Docker
+# Run CMS in Docker
 docker-compose up -d
 
 # Build plugin
@@ -235,11 +235,11 @@ curl -X POST -H "Content-Type: application/json" \
 
 ## File Structure
 ```
-crm/
-├── main.go                 # CRM web application
+cms/
+├── main.go                 # CMS web application
 ├── vm_manager.go           # Firecracker VM management
 ├── go.mod                  # Go dependencies
-├── Dockerfile              # CRM container build
+├── Dockerfile              # CMS container build
 ├── docker-compose.yml      # Development environment
 ├── cmd/
 │   └── plugin-builder/
@@ -273,9 +273,9 @@ crm/
 - The system is designed to be language-agnostic
 - Plugins run in isolated Firecracker microVMs
 - All communication is via HTTP
-- Docker is used for plugin building and CRM deployment
+- Docker is used for plugin building and CMS deployment
 - Persistence is implemented for plugins and instances
-- The CLI tool is independent of the CRM system
+- The CLI tool is independent of the CMS system
 
 ## Contact
 

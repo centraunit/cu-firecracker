@@ -1,6 +1,6 @@
 {
-    "name": "crm/php-plugin",
-    "description": "A PHP CRM plugin example",
+    "name": "cms/php-plugin",
+    "description": "A PHP CMS plugin example",
     "type": "project",
     "require": {
         "php": ">=8.0"

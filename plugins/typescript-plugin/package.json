@@ -1,7 +1,7 @@
 {
-  "name": "typescript-crm-plugin",
+  "name": "typescript-cms-plugin",
   "version": "1.0.0",
-  "description": "A TypeScript CRM plugin example",
+  "description": "A TypeScript CMS plugin example",
   "main": "index.js",
   "scripts": {
     "build": "tsc",

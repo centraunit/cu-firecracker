@@ -18,12 +18,11 @@ type PluginManifest struct {
 
 func main() {
 	pluginDir := flag.String("plugin", "", "Plugin directory path")
-	outputPath := flag.String("output", "", "Output path for rootfs.ext4 (optional)")
 	sizeMB := flag.Int("size", 1000, "Filesystem size in MB (default: 1000)")
 	flag.Parse()
 
 	if *pluginDir == "" {
-		fmt.Println("Usage: plugin-builder -plugin <plugin-directory> [-output <output-path>] [-size <size-in-mb>]")
+		fmt.Println("Usage: plugin-builder -plugin <plugin-directory> [-size <size-in-mb>]")
 		fmt.Println("Example: plugin-builder -plugin plugins/my-plugin -size 2000")
 		os.Exit(1)
 	}
@@ -41,10 +40,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Set default output path if not provided
-	if *outputPath == "" {
-		*outputPath = filepath.Join(*pluginDir, "build", "rootfs.ext4")
-	}
+	// Create build directory and set output path
+	buildDir := filepath.Join(*pluginDir, "build")
+	outputPath := filepath.Join(buildDir, fmt.Sprintf("%s.ext4", manifest.Name))
 
 	fmt.Printf("Building plugin: %s (v%s)\n", manifest.Name, manifest.Version)
 	fmt.Printf("Filesystem size: %d MB\n", *sizeMB)
@@ -57,7 +55,7 @@ func main() {
 	}
 
 	// Step 2: Export container and create ext4 filesystem
-	if err := exportToExt4(imageName, *outputPath, *sizeMB); err != nil {
+	if err := exportToExt4(imageName, outputPath, *sizeMB); err != nil {
 		fmt.Printf("Error: %v\n", err)
 		// Clean up Docker image
 		cleanupDockerImage(imageName)
@@ -69,7 +67,7 @@ func main() {
 		fmt.Printf("Warning: Failed to clean up Docker image: %v\n", err)
 	}
 
-	fmt.Printf("Plugin exported successfully to: %s\n", *outputPath)
+	fmt.Printf("Plugin exported successfully to: %s\n", outputPath)
 }
 
 func exportToExt4(imageName, outputPath string, sizeMB int) error {

@@ -10,7 +10,7 @@ app = Flask(__name__)
 def health():
     return jsonify({
         'status': 'healthy',
-        'plugin': 'python-crm-plugin',
+        'plugin': 'python-cms-plugin',
         'version': '1.0.0',
         'timestamp': datetime.now().isoformat()
     })
@@ -18,8 +18,8 @@ def health():
 @app.route('/', methods=['GET'])
 def main():
     return jsonify({
-        'message': 'Hello from Python CRM Plugin!',
-        'plugin': 'python-crm-plugin',
+        'message': 'Hello from Python CMS Plugin!',
+        'plugin': 'python-cms-plugin',
         'version': '1.0.0',
         'timestamp': datetime.now().isoformat(),
         'request': {
@@ -50,7 +50,7 @@ def get_customers():
             {'id': 2, 'name': 'Bob Wilson', 'email': 'bob@example.com'}
         ],
         'total': 2,
-        'plugin': 'python-crm-plugin'
+        'plugin': 'python-cms-plugin'
     })
 
 @app.route('/api/customers', methods=['POST'])
@@ -63,7 +63,7 @@ def create_customer():
         'status': 'success',
         'message': 'Customer created via Python plugin',
         'customer': {'id': 3, 'name': name, 'email': email},
-        'plugin': 'python-crm-plugin'
+        'plugin': 'python-cms-plugin'
     })
 
 @app.route('/api/analytics', methods=['GET'])
@@ -74,7 +74,7 @@ def analytics():
             'active_deals': 25,
             'revenue': 50000
         },
-        'plugin': 'python-crm-plugin'
+        'plugin': 'python-cms-plugin'
     })
 
 if __name__ == '__main__':

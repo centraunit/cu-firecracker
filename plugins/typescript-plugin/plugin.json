@@ -1,6 +1,6 @@
 {
-  "name": "typescript-crm-plugin",
+  "name": "typescript-cms-plugin",
   "version": "1.0.0",
   "port": 8080,
-  "description": "A TypeScript CRM plugin example"
+  "description": "A TypeScript CMS plugin example"
 } 

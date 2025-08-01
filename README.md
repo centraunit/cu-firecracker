@@ -1,6 +1,6 @@
-# CRM Plugin System
+# CMS Plugin System
 
-A Go-based CRM system with a plugin architecture using AWS Firecracker microVMs. This system allows developers to create plugins in any language, compile them into `rootfs.ext4` files, and run them in isolated microVMs with HTTP communication.
+A Go-based CMS system with a plugin architecture using AWS Firecracker microVMs. This system allows developers to create plugins in any language, compile them into `rootfs.ext4` files, and run them in isolated microVMs with HTTP communication.
 
 ## 🚀 Quick Start
 
@@ -13,9 +13,9 @@ A Go-based CRM system with a plugin architecture using AWS Firecracker microVMs.
 ```bash
 # Clone the repository
 git clone <repository-url>
-cd crm
+cd cms
 
-# Start the CRM system
+# Start the CMS system
 docker-compose up -d
 
 # Build the plugin builder CLI
@@ -34,7 +34,7 @@ curl -X POST -F "rootfs=@plugins/typescript-plugin/build/rootfs.ext4" \
 
 ### Core Components
 
-1. **CRM Web Application** - HTTP server with REST API for plugin management
+1. **CMS Web Application** - HTTP server with REST API for plugin management
 2. **Plugin Builder CLI** - Language-agnostic tool for compiling plugins
 3. **Firecracker Integration** - MicroVM isolation and execution
 4. **Sample Plugins** - TypeScript, Python, and PHP examples
@@ -45,9 +45,9 @@ curl -X POST -F "rootfs=@plugins/typescript-plugin/build/rootfs.ext4" \
 Plugin Developer:
 1. Creates plugin with plugin.json + Dockerfile + source code
 2. Runs: our-plugin-cli export → builds rootfs.ext4
-3. Uploads to CRM
+3. Uploads to CMS
 
-CRM System:
+CMS System:
 1. Receives rootfs.ext4 via HTTP API
 2. Creates Firecracker microVM
 3. Communicates with plugin via HTTP
@@ -57,15 +57,15 @@ CRM System:
 ## 📁 Project Structure
 
 ```
-crm/
-├── main.go                 # CRM web application
+cms/
+├── main.go                 # CMS web application
 ├── vm_manager.go           # Firecracker VM management
 ├── cmd/plugin-builder/     # Plugin compilation CLI
 ├── plugins/                # Sample plugins
 │   ├── typescript-plugin/
 │   ├── python-plugin/
 │   └── php-plugin/
-├── Dockerfile              # CRM container build
+├── Dockerfile              # CMS container build
 ├── docker-compose.yml      # Development environment
 └── HANDOVER.md            # Detailed project documentation
 ```
@@ -124,7 +124,7 @@ make build-cli
 # Build a plugin
 ./bin/plugin-builder -plugin plugins/typescript-plugin
 
-# Start CRM
+# Start CMS
 docker-compose up -d
 
 # Upload plugin
@@ -146,7 +146,7 @@ curl -X POST -H "Content-Type: application/json" \
 ## 📊 Current Status
 
 ### ✅ Completed
-- CRM web application with REST API
+- CMS web application with REST API
 - Plugin upload and persistence
 - Language-agnostic plugin builder CLI
 - Docker integration with Firecracker

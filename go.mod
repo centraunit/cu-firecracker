@@ -1,4 +1,4 @@
-module github.com/issaxx/crm
+module github.com/issaxx/cms
 
 go 1.24.5
 

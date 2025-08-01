@@ -71,8 +71,8 @@ RUN go mod download
 # Copy source code
 COPY . .
 
-# Build the CRM application
-RUN go build -o crm .
+# Build the CMS application
+RUN go build -o cms .
 
 # Create necessary directories
 RUN mkdir -p /tmp/firecracker /var/lib/firecracker
@@ -84,5 +84,5 @@ EXPOSE 8080
 ENV FIRECRACKER_PATH=/usr/local/bin/firecracker
 ENV KERNEL_PATH=/opt/kernel/vmlinux
 
-# Run the CRM
-CMD ["./crm"] 
+# Run the CMS
+CMD ["./cms"] 

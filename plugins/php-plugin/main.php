@@ -55,7 +55,7 @@ switch ($path) {
 function handleHealth() {
     echo json_encode([
         'status' => 'healthy',
-        'plugin' => 'php-crm-plugin',
+        'plugin' => 'php-cms-plugin',
         'version' => '1.0.0',
         'timestamp' => date('c')
     ]);
@@ -63,8 +63,8 @@ function handleHealth() {
 
 function handleMain() {
     echo json_encode([
-        'message' => 'Hello from PHP CRM Plugin!',
-        'plugin' => 'php-crm-plugin',
+        'message' => 'Hello from PHP CMS Plugin!',
+        'plugin' => 'php-cms-plugin',
         'version' => '1.0.0',
         'timestamp' => date('c'),
         'request' => [
@@ -95,7 +95,7 @@ function handleGetCustomers() {
             ['id' => 2, 'name' => 'Diana Prince', 'email' => 'diana@example.com']
         ],
         'total' => 2,
-        'plugin' => 'php-crm-plugin'
+        'plugin' => 'php-cms-plugin'
     ]);
 }
 
@@ -108,7 +108,7 @@ function handleCreateCustomer() {
         'status' => 'success',
         'message' => 'Customer created via PHP plugin',
         'customer' => ['id' => 3, 'name' => $name, 'email' => $email],
-        'plugin' => 'php-crm-plugin'
+        'plugin' => 'php-cms-plugin'
     ]);
 }
 
@@ -126,7 +126,7 @@ function handleReports() {
                 'avg_lifetime_value' => 1200
             ]
         ],
-        'plugin' => 'php-crm-plugin'
+        'plugin' => 'php-cms-plugin'
     ]);
 }
 
