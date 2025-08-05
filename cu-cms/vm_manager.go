@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/firecracker-microvm/firecracker-go-sdk"
 	"github.com/firecracker-microvm/firecracker-go-sdk/client/models"
@@ -24,7 +25,7 @@ func (vm *VMManager) StartVM(instanceID string, plugin *Plugin) error {
 		"firecracker_path", vm.firecrackerPath,
 	)
 
-	// CNI will handle network interface creation automatically
+	// CNI will handle network interface creation
 
 	// Create temporary directory for VM
 	vmDir := filepath.Join("/tmp", "firecracker-"+instanceID)
@@ -56,10 +57,10 @@ func (vm *VMManager) StartVM(instanceID string, plugin *Plugin) error {
 	cfg := firecracker.Config{
 		SocketPath:      socketPath,
 		KernelImagePath: vm.kernelPath,
-		KernelArgs:      "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw init=/sbin/init",
+		KernelArgs:      "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw",
 		Drives: []models.Drive{
 			{
-				DriveID:      firecracker.String("1"),
+				DriveID:      firecracker.String("rootfs"),
 				PathOnHost:   firecracker.String(plugin.RootFSPath),
 				IsReadOnly:   firecracker.Bool(false),
 				IsRootDevice: firecracker.Bool(true),
@@ -69,7 +70,7 @@ func (vm *VMManager) StartVM(instanceID string, plugin *Plugin) error {
 			VcpuCount:  firecracker.Int64(1),
 			MemSizeMib: firecracker.Int64(128),
 		},
-		// Enable networking for plugin communication using CNI
+		// Use CNI for network configuration
 		NetworkInterfaces: []firecracker.NetworkInterface{
 			{
 				CNIConfiguration: &firecracker.CNIConfiguration{
@@ -92,14 +93,27 @@ func (vm *VMManager) StartVM(instanceID string, plugin *Plugin) error {
 
 	logger.Debug("Starting Firecracker machine", "instance_id", instanceID)
 
-	// Start the machine
-	if err := machine.Start(context.Background()); err != nil {
+	// Start the machine with a shorter timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := machine.Start(ctx); err != nil {
 		logger.Error("Failed to start Firecracker machine", "instance_id", instanceID, "error", err)
 		return fmt.Errorf("failed to start machine: %v", err)
 	}
 
+	logger.Debug("Firecracker machine started successfully", "instance_id", instanceID)
+
 	// Store the machine instance
 	vm.instances[instanceID] = machine
+
+	// Get the actual IP assigned by CNI
+	actualIP, err := vm.GetVMIP(instanceID)
+	if err != nil {
+		logger.Warn("Failed to get VM IP", "instance_id", instanceID, "error", err)
+	} else {
+		logger.Info("Actual VM IP obtained from CNI", "instance_id", instanceID, "actual_ip", actualIP)
+	}
 
 	logger.Info("VM started successfully",
 		"instance_id", instanceID,
@@ -107,6 +121,7 @@ func (vm *VMManager) StartVM(instanceID string, plugin *Plugin) error {
 		"plugin_name", plugin.Name,
 		"vcpu_count", 1,
 		"memory_mib", 128,
+		"actual_ip", actualIP,
 	)
 
 	return nil
@@ -185,4 +200,26 @@ func (vm *VMManager) ListVMs() []string {
 
 	logger.Debug("Listed VM instances", "count", len(instanceIDs), "instances", instanceIDs)
 	return instanceIDs
+}
+
+// GetVMIP gets the actual IP assigned by CNI to a VM instance
+func (vm *VMManager) GetVMIP(instanceID string) (string, error) {
+	vm.mutex.RLock()
+	defer vm.mutex.RUnlock()
+
+	machine, exists := vm.instances[instanceID]
+	if !exists {
+		return "", fmt.Errorf("VM instance %s not found", instanceID)
+	}
+
+	// Get the actual IP from CNI configuration
+	if len(machine.Cfg.NetworkInterfaces) > 0 && machine.Cfg.NetworkInterfaces[0].StaticConfiguration != nil {
+		if machine.Cfg.NetworkInterfaces[0].StaticConfiguration.IPConfiguration != nil {
+			actualIP := machine.Cfg.NetworkInterfaces[0].StaticConfiguration.IPConfiguration.IPAddr.IP.String()
+			logger.Debug("Retrieved VM IP from CNI", "instance_id", instanceID, "ip", actualIP)
+			return actualIP, nil
+		}
+	}
+
+	return "", fmt.Errorf("no IP configuration found for VM %s", instanceID)
 }

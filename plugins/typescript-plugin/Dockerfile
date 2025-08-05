@@ -1,45 +1,36 @@
-FROM node:18-alpine
+# Stage 1: Compile the TypeScript plugin
+FROM node:18-alpine AS builder
 
 WORKDIR /plugin
-
-# Copy package files
 COPY package*.json ./
-
-# Install all dependencies (including dev for TypeScript)
 RUN npm install
-
-# Install openrc (Alpine's init system) and other necessary packages
-RUN apk add --no-cache openrc linux-virt
-
-# Copy source code
 COPY . .
-
-# Build TypeScript
 RUN npm run build
-
-# Remove dev dependencies to reduce image size
 RUN npm prune --omit=dev
 
-# Clean up unnecessary files to reduce image size
-RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/share/doc /usr/local/share/man /usr/share/doc /usr/share/man /var/cache/apk/*
+# Stage 2: Build minimal Alpine + OpenRC root filesystem
+FROM alpine:latest
 
-# Create service file for openrc
-RUN echo '#!/sbin/openrc-run' > /etc/init.d/plugin-service && \
-    echo 'name="Plugin Service"' >> /etc/init.d/plugin-service && \
-    echo 'description="Node.js Plugin Service"' >> /etc/init.d/plugin-service && \
-    echo 'command="/usr/bin/node"' >> /etc/init.d/plugin-service && \
-    echo 'command_args="/plugin/index.js"' >> /etc/init.d/plugin-service && \
-    echo 'command_background="yes"' >> /etc/init.d/plugin-service && \
-    echo 'pidfile="/var/run/plugin-service.pid"' >> /etc/init.d/plugin-service && \
-    echo 'depend() {' >> /etc/init.d/plugin-service && \
-    echo '  need net' >> /etc/init.d/plugin-service && \
-    echo '}' >> /etc/init.d/plugin-service && \
-    chmod +x /etc/init.d/plugin-service
+RUN apk add --no-cache nodejs npm
 
-# Add service to default runlevel
-RUN rc-update add plugin-service default
+WORKDIR /plugin
+COPY --from=builder /plugin/index.js /plugin/
+COPY --from=builder /plugin/package.json /plugin/
+COPY --from=builder /plugin/package-lock.json /plugin/
+RUN npm install --omit=dev
+
+# Create a simple init script that starts the Node.js application
+RUN echo '#!/bin/sh' > /tmp/init.sh && \
+    echo 'set -e' >> /tmp/init.sh && \
+    echo 'mount -t proc none /proc' >> /tmp/init.sh && \
+    echo 'mount -t sysfs none /sys' >> /tmp/init.sh && \
+    echo 'mkdir -p /dev/pts' >> /tmp/init.sh && \
+    echo 'mount -t devpts none /dev/pts' >> /tmp/init.sh && \
+    echo 'cd /plugin' >> /tmp/init.sh && \
+    echo 'exec /usr/bin/node index.js' >> /tmp/init.sh && \
+    chmod +x /tmp/init.sh && \
+    mv /tmp/init.sh /sbin/init
 
 EXPOSE 8080
 
-# Use openrc as init system
-CMD ["/sbin/init"] 
+CMD ["/sbin/init"]

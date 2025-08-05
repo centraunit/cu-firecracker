@@ -92,7 +92,6 @@ type VMInstance struct {
 	PluginID  string    `json:"plugin_id"`
 	Status    string    `json:"status"`
 	CreatedAt time.Time `json:"created_at"`
-	IP        string    `json:"ip,omitempty"`
 }
 
 // CMS represents the main CMS application
@@ -582,16 +581,21 @@ func (cms *CMS) handleExecutePlugin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	logger.Debug("VM started, waiting for boot", "instance_id", instanceID)
+	logger.Debug("VM started, getting actual IP from CNI", "instance_id", instanceID)
 
-	// Firecracker VMs start very quickly, no need for long waits
-	// Just a brief moment for the kernel to initialize
-	time.Sleep(500 * time.Millisecond)
+	// Get the actual IP assigned by CNI from the VM manager
+	actualIP, err := cms.vmManager.GetVMIP(instanceID)
+	if err != nil {
+		logger.Error("Failed to get VM IP", "instance_id", instanceID, "error", err)
+		http.Error(w, "Failed to get VM IP", http.StatusInternalServerError)
+		return
+	}
+
+	logger.Info("Using actual IP from CNI", "instance_id", instanceID, "actual_ip", actualIP)
 
 	// Make HTTP request to the plugin's server inside the microVM
-	// In a production environment, you'd get the VM's IP from the network setup
-	// For now, we'll use the expected IP from our CNI configuration
-	pluginURL := fmt.Sprintf("http://172.16.0.2:8080/execute")
+	// Use the actual IP assigned by CNI
+	pluginURL := fmt.Sprintf("http://%s:8080/execute", actualIP)
 
 	logger.Debug("Making request to plugin", "url", pluginURL, "instance_id", instanceID)
 
@@ -609,9 +613,9 @@ func (cms *CMS) handleExecutePlugin(w http.ResponseWriter, r *http.Request) {
 		"action", action,
 	)
 
-	// Make HTTP request to plugin with increased timeout for plugin startup
+	// Make HTTP request to plugin with short timeout
 	client := &http.Client{
-		Timeout: 60 * time.Second, // Increased timeout to allow plugin startup
+		Timeout: 5 * time.Second, // Short timeout to prevent hanging
 	}
 	resp, err := client.Post(pluginURL, "application/json", bytes.NewBuffer(requestBodyBytes))
 	if err != nil {
