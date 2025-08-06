@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -21,6 +20,7 @@ import (
 
 	"github.com/firecracker-microvm/firecracker-go-sdk"
 	"github.com/gorilla/mux"
+	"github.com/sirupsen/logrus"
 )
 
 // Configuration constants
@@ -37,7 +37,7 @@ const (
 
 // Global logger and HTTP client pool
 var (
-	logger     *slog.Logger
+	logger     *logrus.Logger
 	httpClient *http.Client
 )
 
@@ -151,7 +151,7 @@ func NewCMS() *CMS {
 
 	// Initialize snapshot directory
 	if err := cms.vmManager.initSnapshotDir(); err != nil {
-		logger.Error("Failed to initialize snapshot directory", "error", err)
+		logger.WithFields(logrus.Fields{"error": err}).Error("Failed to initialize snapshot directory")
 	}
 
 	// Setup graceful shutdown
@@ -195,7 +195,7 @@ func (cms *CMS) setupGracefulShutdown() {
 
 	go func() {
 		sig := <-sigChan
-		logger.Info("Received shutdown signal", "signal", sig)
+		logger.WithFields(logrus.Fields{"signal": sig}).Info("Received shutdown signal")
 		cms.Shutdown()
 	}()
 }
@@ -212,7 +212,7 @@ func (cms *CMS) Shutdown() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if err := cms.httpServer.Shutdown(ctx); err != nil {
-			logger.Error("HTTP server shutdown failed", "error", err)
+			logger.WithFields(logrus.Fields{"error": err}).Error("HTTP server shutdown failed")
 		}
 	}
 
@@ -259,12 +259,12 @@ func (cms *CMS) Start(port string) error {
 		IdleTimeout:  120 * time.Second,
 	}
 
-	logger.Info("Starting CMS server", "port", port)
+	logger.WithFields(logrus.Fields{"port": port}).Info("Starting CMS server")
 
 	// Start server in goroutine
 	go func() {
 		if err := cms.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Error("Server failed", "error", err)
+			logger.WithFields(logrus.Fields{"error": err}).Error("Server failed")
 		}
 	}()
 
@@ -285,14 +285,14 @@ func (cms *CMS) loggingMiddleware(next http.Handler) http.Handler {
 
 		next.ServeHTTP(wrapped, r)
 
-		logger.Debug("HTTP request",
-			"method", r.Method,
-			"url", r.URL.String(),
-			"remote_addr", r.RemoteAddr,
-			"user_agent", r.UserAgent(),
-			"status_code", wrapped.statusCode,
-			"duration_ms", time.Since(start).Milliseconds(),
-		)
+		logger.WithFields(logrus.Fields{
+			"method":      r.Method,
+			"url":         r.URL.String(),
+			"remote_addr": r.RemoteAddr,
+			"user_agent":  r.UserAgent(),
+			"status_code": wrapped.statusCode,
+			"duration_ms": time.Since(start).Milliseconds(),
+		}).Debug("HTTP request")
 	})
 }
 
@@ -301,12 +301,7 @@ func (cms *CMS) recoveryMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if err := recover(); err != nil {
-				logger.Error("Panic recovered",
-					"error", err,
-					"method", r.Method,
-					"url", r.URL.String(),
-					"remote_addr", r.RemoteAddr,
-				)
+				logger.WithFields(logrus.Fields{"error": err}).Error("Panic recovered")
 				cms.sendErrorResponse(w, "Internal server error", http.StatusInternalServerError)
 			}
 		}()
@@ -411,12 +406,7 @@ func (cms *CMS) validateActionRequest(req *struct {
 
 // handleListPlugins returns all registered plugins
 func (cms *CMS) handleListPlugins(w http.ResponseWriter, r *http.Request) {
-	logger.Debug("Handling list plugins request",
-		"method", r.Method,
-		"url", r.URL.String(),
-		"remote_addr", r.RemoteAddr,
-		"user_agent", r.UserAgent(),
-	)
+	logger.Debug("Handling list plugins request")
 
 	cms.mutex.RLock()
 	defer cms.mutex.RUnlock()
@@ -426,23 +416,18 @@ func (cms *CMS) handleListPlugins(w http.ResponseWriter, r *http.Request) {
 		plugins = append(plugins, plugin)
 	}
 
-	logger.Info("Listed plugins", "count", len(plugins))
+	logger.WithFields(logrus.Fields{"count": len(plugins)}).Info("Listed plugins")
 
 	cms.sendSuccessResponse(w, plugins, http.StatusOK)
 }
 
 // handleUploadPlugin handles plugin upload and registration
 func (cms *CMS) handleUploadPlugin(w http.ResponseWriter, r *http.Request) {
-	logger.Debug("Handling plugin upload request",
-		"method", r.Method,
-		"url", r.URL.String(),
-		"remote_addr", r.RemoteAddr,
-		"content_length", r.ContentLength,
-	)
+	logger.Debug("Handling plugin upload request")
 
 	// Parse multipart form
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
-		logger.Error("Failed to parse multipart form", "error", err)
+		logger.WithFields(logrus.Fields{"error": err}).Error("Failed to parse multipart form")
 		cms.sendErrorResponse(w, "Failed to parse form", http.StatusBadRequest)
 		return
 	}
@@ -451,16 +436,16 @@ func (cms *CMS) handleUploadPlugin(w http.ResponseWriter, r *http.Request) {
 	formName := r.FormValue("name")
 	formDescription := r.FormValue("description")
 
-	logger.Debug("Plugin upload form data",
-		"form_name", formName,
-		"form_description", formDescription,
-		"form_fields", len(r.MultipartForm.Value),
-	)
+	logger.WithFields(logrus.Fields{
+		"form_name":        formName,
+		"form_description": formDescription,
+		"form_fields":      len(r.MultipartForm.Value),
+	}).Debug("Plugin upload form data")
 
 	// Get uploaded ZIP file (containing rootfs.ext4 + plugin.json)
 	file, header, err := r.FormFile("plugin")
 	if err != nil {
-		logger.Error("Failed to get uploaded file", "error", err)
+		logger.WithFields(logrus.Fields{"error": err}).Error("Failed to get uploaded file")
 		cms.sendErrorResponse(w, "Failed to get uploaded plugin ZIP file", http.StatusBadRequest)
 		return
 	}
@@ -468,21 +453,21 @@ func (cms *CMS) handleUploadPlugin(w http.ResponseWriter, r *http.Request) {
 
 	// Verify it's a ZIP file
 	if !strings.HasSuffix(strings.ToLower(header.Filename), ".zip") {
-		logger.Error("Invalid file type", "filename", header.Filename)
+		logger.WithFields(logrus.Fields{"filename": header.Filename}).Error("Invalid file type")
 		cms.sendErrorResponse(w, "Plugin must be a ZIP file containing rootfs.ext4 and plugin.json", http.StatusBadRequest)
 		return
 	}
 
-	logger.Debug("Received plugin ZIP file",
-		"filename", header.Filename,
-		"size", header.Size,
-		"content_type", header.Header.Get("Content-Type"),
-	)
+	logger.WithFields(logrus.Fields{
+		"filename":     header.Filename,
+		"size":         header.Size,
+		"content_type": header.Header.Get("Content-Type"),
+	}).Debug("Received plugin ZIP file")
 
 	// Create plugins directory if it doesn't exist
 	pluginsDir := "/app/data/plugins"
 	if err := os.MkdirAll(pluginsDir, 0755); err != nil {
-		logger.Error("Failed to create plugins directory", "path", pluginsDir, "error", err)
+		logger.WithFields(logrus.Fields{"path": pluginsDir, "error": err}).Error("Failed to create plugins directory")
 		cms.sendErrorResponse(w, "Failed to create plugins directory", http.StatusInternalServerError)
 		return
 	}
@@ -490,7 +475,7 @@ func (cms *CMS) handleUploadPlugin(w http.ResponseWriter, r *http.Request) {
 	// Save the ZIP file temporarily for extraction (use system temp, not plugins dir)
 	tempDir, err := os.MkdirTemp("", "cms-plugin-upload-")
 	if err != nil {
-		logger.Error("Failed to create temp directory", "error", err)
+		logger.WithFields(logrus.Fields{"error": err}).Error("Failed to create temp directory")
 		cms.sendErrorResponse(w, "Failed to create temp directory", http.StatusInternalServerError)
 		return
 	}
@@ -499,24 +484,24 @@ func (cms *CMS) handleUploadPlugin(w http.ResponseWriter, r *http.Request) {
 	zipPath := filepath.Join(tempDir, "plugin.zip")
 	dst, err := os.Create(zipPath)
 	if err != nil {
-		logger.Error("Failed to create ZIP file", "path", zipPath, "error", err)
+		logger.WithFields(logrus.Fields{"path": zipPath, "error": err}).Error("Failed to create ZIP file")
 		cms.sendErrorResponse(w, "Failed to save ZIP file", http.StatusInternalServerError)
 		return
 	}
 
 	if _, err := io.Copy(dst, file); err != nil {
 		dst.Close()
-		logger.Error("Failed to save ZIP file", "error", err)
+		logger.WithFields(logrus.Fields{"error": err}).Error("Failed to save ZIP file")
 		cms.sendErrorResponse(w, "Failed to save ZIP file", http.StatusInternalServerError)
 		return
 	}
 	dst.Close()
 
-	logger.Debug("ZIP file saved", "path", zipPath)
+	logger.WithFields(logrus.Fields{"path": zipPath}).Debug("ZIP file saved")
 
 	// Extract ZIP file
 	if err := cms.extractPluginZip(zipPath, tempDir); err != nil {
-		logger.Error("Failed to extract ZIP", "error", err)
+		logger.WithFields(logrus.Fields{"error": err}).Error("Failed to extract ZIP")
 		cms.sendErrorResponse(w, fmt.Sprintf("Failed to extract plugin ZIP: %v", err), http.StatusBadRequest)
 		return
 	}
@@ -525,7 +510,7 @@ func (cms *CMS) handleUploadPlugin(w http.ResponseWriter, r *http.Request) {
 	pluginJsonPath := filepath.Join(tempDir, "plugin.json")
 	metadata, err := cms.parsePluginJson(pluginJsonPath)
 	if err != nil {
-		logger.Error("Failed to parse plugin.json", "error", err)
+		logger.WithFields(logrus.Fields{"error": err}).Error("Failed to parse plugin.json")
 		cms.sendErrorResponse(w, fmt.Sprintf("Invalid plugin.json: %v", err), http.StatusBadRequest)
 		return
 	}
@@ -553,7 +538,7 @@ func (cms *CMS) handleUploadPlugin(w http.ResponseWriter, r *http.Request) {
 
 	// Copy rootfs file (can't use rename due to potential cross-device link)
 	if err := copyFile(rootfsTempPath, rootfsPath); err != nil {
-		logger.Error("Failed to copy rootfs", "error", err)
+		logger.WithFields(logrus.Fields{"error": err}).Error("Failed to copy rootfs")
 		cms.sendErrorResponse(w, "Failed to install plugin rootfs", http.StatusInternalServerError)
 		return
 	}
@@ -561,7 +546,7 @@ func (cms *CMS) handleUploadPlugin(w http.ResponseWriter, r *http.Request) {
 	// Remove temp file after successful copy
 	os.Remove(rootfsTempPath)
 
-	logger.Debug("Plugin extracted successfully", "plugin_slug", metadata.Slug, "rootfs_path", rootfsPath)
+	logger.WithFields(logrus.Fields{"plugin_slug": metadata.Slug, "rootfs_path": rootfsPath}).Debug("Plugin extracted successfully")
 
 	// Use form data as fallback if not provided in plugin metadata
 	if metadata.Name == "" {
@@ -575,7 +560,7 @@ func (cms *CMS) handleUploadPlugin(w http.ResponseWriter, r *http.Request) {
 	cms.mutex.Lock()
 	if existingPlugin, exists := cms.plugins[metadata.Slug]; exists {
 		// Update existing plugin
-		logger.Info("Updating existing plugin", "slug", metadata.Slug)
+		logger.WithFields(logrus.Fields{"slug": metadata.Slug}).Info("Updating existing plugin")
 
 		// Update the plugin (rootfs already replaced above)
 		existingPlugin.Name = metadata.Name
@@ -591,9 +576,9 @@ func (cms *CMS) handleUploadPlugin(w http.ResponseWriter, r *http.Request) {
 		cms.mutex.Unlock()
 
 		// Perform health check to verify plugin is working
-		logger.Info("Performing health check on updated plugin", "plugin_slug", existingPlugin.Slug)
+		logger.WithFields(logrus.Fields{"plugin_slug": existingPlugin.Slug}).Info("Performing health check on updated plugin")
 		if err := cms.verifyPluginHealth(existingPlugin); err != nil {
-			logger.Error("Plugin health check failed", "plugin_slug", existingPlugin.Slug, "error", err)
+			logger.WithFields(logrus.Fields{"plugin_slug": existingPlugin.Slug, "error": err}).Error("Plugin health check failed")
 			cms.sendErrorResponse(w, fmt.Sprintf("Plugin health check failed: %v", err), http.StatusBadRequest)
 			return
 		}
@@ -605,16 +590,16 @@ func (cms *CMS) handleUploadPlugin(w http.ResponseWriter, r *http.Request) {
 		existingPlugin.Health.LastCheck = time.Now()
 		cms.mutex.Unlock()
 
-		logger.Info("Plugin updated and verified successfully",
-			"slug", metadata.Slug,
-			"name", metadata.Name,
-			"version", metadata.Version,
-		)
+		logger.WithFields(logrus.Fields{
+			"slug":    metadata.Slug,
+			"name":    metadata.Name,
+			"version": metadata.Version,
+		}).Info("Plugin updated and verified successfully")
 
 		// Save plugins to disk
 		cms.mutex.Lock()
 		if err := cms.savePlugins(); err != nil {
-			logger.Error("Failed to save plugins", "error", err)
+			logger.WithFields(logrus.Fields{"error": err}).Error("Failed to save plugins")
 		}
 		cms.mutex.Unlock()
 
@@ -643,7 +628,7 @@ func (cms *CMS) handleUploadPlugin(w http.ResponseWriter, r *http.Request) {
 	cms.mutex.Unlock()
 
 	// Perform health check to verify plugin is working
-	logger.Info("Performing health check on uploaded plugin", "plugin_slug", plugin.Slug)
+	logger.WithFields(logrus.Fields{"plugin_slug": plugin.Slug}).Info("Performing health check on uploaded plugin")
 	if err := cms.verifyPluginHealth(plugin); err != nil {
 		// Remove the plugin from registry if health check fails
 		cms.mutex.Lock()
@@ -653,7 +638,7 @@ func (cms *CMS) handleUploadPlugin(w http.ResponseWriter, r *http.Request) {
 		// Clean up plugin files
 		os.Remove(plugin.RootFSPath)
 
-		logger.Error("Plugin health check failed", "plugin_slug", plugin.Slug, "error", err)
+		logger.WithFields(logrus.Fields{"plugin_slug": plugin.Slug, "error": err}).Error("Plugin health check failed")
 		cms.sendErrorResponse(w, fmt.Sprintf("Plugin health check failed: %v", err), http.StatusBadRequest)
 		return
 	}
@@ -665,16 +650,16 @@ func (cms *CMS) handleUploadPlugin(w http.ResponseWriter, r *http.Request) {
 	plugin.Health.LastCheck = time.Now()
 	cms.mutex.Unlock()
 
-	logger.Info("Plugin uploaded and verified successfully",
-		"plugin_slug", plugin.Slug,
-		"name", metadata.Name,
-		"version", metadata.Version,
-		"actions", len(metadata.Actions),
-	)
+	logger.WithFields(logrus.Fields{
+		"plugin_slug": plugin.Slug,
+		"name":        metadata.Name,
+		"version":     metadata.Version,
+		"actions":     len(metadata.Actions),
+	}).Info("Plugin uploaded and verified successfully")
 
 	// Save plugins to disk
 	if err := cms.savePlugins(); err != nil {
-		logger.Error("Failed to save plugins", "error", err)
+		logger.WithFields(logrus.Fields{"error": err}).Error("Failed to save plugins")
 	}
 
 	cms.sendSuccessResponse(w, plugin, http.StatusCreated)
@@ -685,23 +670,23 @@ func (cms *CMS) handleGetPlugin(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	pluginSlug := vars["slug"] // Using 'id' but it's actually a slug now
 
-	logger.Debug("Handling get plugin request",
-		"plugin_slug", pluginSlug,
-		"method", r.Method,
-		"url", r.URL.String(),
-	)
+	logger.WithFields(logrus.Fields{
+		"plugin_slug": pluginSlug,
+		"method":      r.Method,
+		"url":         r.URL.String(),
+	}).Debug("Handling get plugin request")
 
 	cms.mutex.RLock()
 	plugin, exists := cms.plugins[pluginSlug]
 	cms.mutex.RUnlock()
 
 	if !exists {
-		logger.Warn("Plugin not found", "plugin_slug", pluginSlug)
+		logger.WithFields(logrus.Fields{"plugin_slug": pluginSlug}).Warn("Plugin not found")
 		cms.sendErrorResponse(w, "Plugin not found", http.StatusNotFound)
 		return
 	}
 
-	logger.Debug("Retrieved plugin", "plugin_slug", pluginSlug, "name", plugin.Name, "version", plugin.Version)
+	logger.WithFields(logrus.Fields{"plugin_slug": pluginSlug, "name": plugin.Name, "version": plugin.Version}).Debug("Retrieved plugin")
 
 	cms.sendSuccessResponse(w, plugin, http.StatusOK)
 }
@@ -711,39 +696,39 @@ func (cms *CMS) handleDeletePlugin(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	pluginSlug := vars["slug"] // Using 'id' but it's actually a slug now
 
-	logger.Debug("Handling delete plugin request",
-		"plugin_slug", pluginSlug,
-		"method", r.Method,
-		"url", r.URL.String(),
-	)
+	logger.WithFields(logrus.Fields{
+		"plugin_slug": pluginSlug,
+		"method":      r.Method,
+		"url":         r.URL.String(),
+	}).Debug("Handling delete plugin request")
 
 	cms.mutex.Lock()
 	defer cms.mutex.Unlock()
 
 	plugin, exists := cms.plugins[pluginSlug]
 	if !exists {
-		logger.Warn("Plugin not found for deletion", "plugin_slug", pluginSlug)
+		logger.WithFields(logrus.Fields{"plugin_slug": pluginSlug}).Warn("Plugin not found for deletion")
 		cms.sendErrorResponse(w, "Plugin not found", http.StatusNotFound)
 		return
 	}
 
 	// Remove rootfs file
 	if err := os.Remove(plugin.RootFSPath); err != nil {
-		logger.Error("Failed to remove rootfs file", "plugin_slug", pluginSlug, "error", err)
+		logger.WithFields(logrus.Fields{"plugin_slug": pluginSlug, "error": err}).Error("Failed to remove rootfs file")
 	}
 
 	delete(cms.plugins, pluginSlug)
 
-	logger.Info("Plugin deleted successfully",
-		"plugin_slug", pluginSlug,
-		"name", plugin.Name,
-		"version", plugin.Version,
-		"rootfs_path", plugin.RootFSPath,
-	)
+	logger.WithFields(logrus.Fields{
+		"plugin_slug": pluginSlug,
+		"name":        plugin.Name,
+		"version":     plugin.Version,
+		"rootfs_path": plugin.RootFSPath,
+	}).Info("Plugin deleted successfully")
 
 	// Save plugins to disk
 	if err := cms.savePlugins(); err != nil {
-		logger.Error("Failed to save plugins", "error", err)
+		logger.WithFields(logrus.Fields{"error": err}).Error("Failed to save plugins")
 	}
 
 	w.WriteHeader(http.StatusNoContent)
@@ -755,27 +740,27 @@ func (cms *CMS) savePlugins() error {
 
 	pluginsDir := "/app/data/plugins"
 	if err := os.MkdirAll(pluginsDir, 0755); err != nil {
-		logger.Error("Failed to create plugins directory", "path", pluginsDir, "error", err)
+		logger.WithFields(logrus.Fields{"path": pluginsDir, "error": err}).Error("Failed to create plugins directory")
 		return err
 	}
 
 	pluginsFile := filepath.Join(pluginsDir, "plugins.json")
 	data, err := json.MarshalIndent(cms.plugins, "", "  ")
 	if err != nil {
-		logger.Error("Failed to marshal plugins to JSON", "error", err)
+		logger.WithFields(logrus.Fields{"error": err}).Error("Failed to marshal plugins to JSON")
 		return err
 	}
 
 	if err := os.WriteFile(pluginsFile, data, 0644); err != nil {
-		logger.Error("Failed to write plugins file", "path", pluginsFile, "error", err)
+		logger.WithFields(logrus.Fields{"path": pluginsFile, "error": err}).Error("Failed to write plugins file")
 		return err
 	}
 
-	logger.Info("Plugins saved to registry",
-		"file", pluginsFile,
-		"plugin_count", len(cms.plugins),
-		"file_size", len(data),
-	)
+	logger.WithFields(logrus.Fields{
+		"file":         pluginsFile,
+		"plugin_count": len(cms.plugins),
+		"file_size":    len(data),
+	}).Info("Plugins saved to registry")
 
 	return nil
 }
@@ -784,17 +769,17 @@ func (cms *CMS) savePlugins() error {
 func (cms *CMS) loadPlugins() {
 	pluginsFile := "/app/data/plugins/plugins.json"
 
-	logger.Debug("Loading plugins from registry", "file", pluginsFile)
+	logger.WithFields(logrus.Fields{"file": pluginsFile}).Debug("Loading plugins from registry")
 
 	data, err := os.ReadFile(pluginsFile)
 	if err != nil {
-		logger.Info("No existing plugins registry found", "file", pluginsFile)
+		logger.WithFields(logrus.Fields{"file": pluginsFile}).Info("No existing plugins registry found")
 		return
 	}
 
 	var plugins map[string]*Plugin
 	if err := json.Unmarshal(data, &plugins); err != nil {
-		logger.Error("Failed to parse plugins registry", "file", pluginsFile, "error", err)
+		logger.WithFields(logrus.Fields{"file": pluginsFile, "error": err}).Error("Failed to parse plugins registry")
 		return
 	}
 
@@ -802,10 +787,10 @@ func (cms *CMS) loadPlugins() {
 	defer cms.mutex.Unlock()
 	cms.plugins = plugins
 
-	logger.Info("Loaded plugins from registry",
-		"file", pluginsFile,
-		"count", len(plugins),
-	)
+	logger.WithFields(logrus.Fields{
+		"file":  pluginsFile,
+		"count": len(plugins),
+	}).Info("Loaded plugins from registry")
 }
 
 // makeHTTPRequest makes an HTTP request and returns the response as a map
@@ -857,11 +842,7 @@ func (cms *CMS) healthCheckWithRetries(vmIP, pluginSlug string, maxRetries int, 
 		response, err := cms.makeHTTPRequest("GET", healthURL, nil)
 		if err != nil {
 			lastErr = err
-			logger.Debug("Health check failed, retrying",
-				"plugin_slug", pluginSlug,
-				"attempt", attempt,
-				"max_retries", maxRetries,
-				"error", err)
+			logger.WithFields(logrus.Fields{"plugin_slug": pluginSlug, "attempt": attempt, "max_retries": maxRetries, "error": err}).Debug("Health check failed, retrying")
 
 			if attempt < maxRetries {
 				time.Sleep(retryDelay)
@@ -870,16 +851,14 @@ func (cms *CMS) healthCheckWithRetries(vmIP, pluginSlug string, maxRetries int, 
 		} else {
 			// Validate health response
 			if status, ok := response["status"].(string); ok && status == "healthy" {
-				logger.Info("Health check successful",
-					"plugin_slug", pluginSlug,
-					"attempt", attempt)
+				logger.WithFields(logrus.Fields{
+					"plugin_slug": pluginSlug,
+					"attempt":     attempt,
+				}).Info("Health check successful")
 				return nil
 			} else {
 				lastErr = fmt.Errorf("unhealthy status response: %v", response)
-				logger.Debug("Health check returned unhealthy status, retrying",
-					"plugin_slug", pluginSlug,
-					"attempt", attempt,
-					"response", response)
+				logger.WithFields(logrus.Fields{"plugin_slug": pluginSlug, "attempt": attempt, "response": response}).Debug("Health check returned unhealthy status, retrying")
 
 				if attempt < maxRetries {
 					time.Sleep(retryDelay)
@@ -907,34 +886,34 @@ func (cms *CMS) handleActivatePlugin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if plugin.Status == "active" {
-		logger.Info("Plugin already active", "plugin_slug", pluginSlug)
+		logger.WithFields(logrus.Fields{"plugin_slug": pluginSlug}).Info("Plugin already active")
 		cms.sendSuccessResponse(w, plugin, http.StatusOK)
 		return
 	}
 
 	// If snapshot already exists, just mark as active
 	if cms.vmManager.HasSnapshot(pluginSlug) {
-		logger.Info("Plugin has existing snapshot, marking as active", "plugin_slug", pluginSlug)
+		logger.WithFields(logrus.Fields{"plugin_slug": pluginSlug}).Info("Plugin has existing snapshot, marking as active")
 		plugin.Status = "active"
 		plugin.UpdatedAt = time.Now()
 
 		if err := cms.savePlugins(); err != nil {
-			logger.Error("Failed to save plugins after activation", "error", err)
+			logger.WithFields(logrus.Fields{"error": err}).Error("Failed to save plugins after activation")
 			cms.sendErrorResponse(w, "Failed to save plugin state", http.StatusInternalServerError)
 			return
 		}
 
-		logger.Info("Plugin activated with existing snapshot", "plugin_slug", pluginSlug)
+		logger.WithFields(logrus.Fields{"plugin_slug": pluginSlug}).Info("Plugin activated with existing snapshot")
 		cms.sendSuccessResponse(w, plugin, http.StatusOK)
 		return
 	}
 
 	// Create temporary VM to warm up and take snapshot
 	instanceID := pluginSlug // Use plugin slug as instance ID for consistency
-	logger.Info("Creating VM for snapshot generation", "plugin_slug", pluginSlug, "instance_id", instanceID)
+	logger.WithFields(logrus.Fields{"plugin_slug": pluginSlug, "instance_id": instanceID}).Info("Creating VM for snapshot generation")
 
 	if err := cms.vmManager.StartVM(instanceID, plugin); err != nil {
-		logger.Error("Failed to start VM for snapshot", "plugin_slug", pluginSlug, "error", err)
+		logger.WithFields(logrus.Fields{"plugin_slug": pluginSlug, "error": err}).Error("Failed to start VM for snapshot")
 		cms.sendErrorResponse(w, "Failed to start VM", http.StatusInternalServerError)
 		return
 	}
@@ -942,7 +921,7 @@ func (cms *CMS) handleActivatePlugin(w http.ResponseWriter, r *http.Request) {
 	// Clean up temporary VM after snapshotting
 	defer func() {
 		if stopErr := cms.vmManager.StopVM(instanceID); stopErr != nil {
-			logger.Error("Failed to stop temporary VM after snapshot", "instance_id", instanceID, "error", stopErr)
+			logger.WithFields(logrus.Fields{"instance_id": instanceID, "error": stopErr}).Error("Failed to stop temporary VM after snapshot")
 		}
 	}()
 
@@ -952,16 +931,13 @@ func (cms *CMS) handleActivatePlugin(w http.ResponseWriter, r *http.Request) {
 	// Perform health check to ensure VM is ready (with retries for Flask startup)
 	vmIP, exists := cms.vmManager.getVMIP(instanceID)
 	if !exists {
-		logger.Error("Failed to get VM IP for snapshot", "plugin_slug", pluginSlug)
+		logger.WithFields(logrus.Fields{"plugin_slug": pluginSlug}).Error("Failed to get VM IP for snapshot")
 		cms.sendErrorResponse(w, "Failed to get VM IP", http.StatusInternalServerError)
 		return
 	}
 
 	if err := cms.healthCheckWithRetries(vmIP, pluginSlug, 15, 1*time.Second); err != nil {
-		logger.Error("VM health check failed during activation after retries",
-			"plugin_slug", pluginSlug,
-			"attempts", 15,
-			"error", err)
+		logger.WithFields(logrus.Fields{"plugin_slug": pluginSlug, "attempts": 15, "error": err}).Error("VM health check failed during activation after retries")
 		cms.sendErrorResponse(w, "Plugin failed health check", http.StatusInternalServerError)
 		return
 	}
@@ -969,7 +945,7 @@ func (cms *CMS) handleActivatePlugin(w http.ResponseWriter, r *http.Request) {
 	// Create snapshot for fast future execution
 	snapshotPath := cms.vmManager.GetSnapshotPath(pluginSlug)
 	if err := cms.vmManager.CreateSnapshot(instanceID, snapshotPath); err != nil {
-		logger.Error("Failed to create snapshot", "plugin_slug", pluginSlug, "error", err)
+		logger.WithFields(logrus.Fields{"plugin_slug": pluginSlug, "error": err}).Error("Failed to create snapshot")
 		cms.sendErrorResponse(w, "Failed to create snapshot", http.StatusInternalServerError)
 		return
 	}
@@ -979,12 +955,12 @@ func (cms *CMS) handleActivatePlugin(w http.ResponseWriter, r *http.Request) {
 
 	// Save to registry
 	if err := cms.savePlugins(); err != nil {
-		logger.Error("Failed to save plugins after activation", "error", err)
+		logger.WithFields(logrus.Fields{"error": err}).Error("Failed to save plugins after activation")
 		cms.sendErrorResponse(w, "Failed to save plugin state", http.StatusInternalServerError)
 		return
 	}
 
-	logger.Info("Plugin activated successfully with snapshot", "plugin_slug", pluginSlug, "snapshot_path", snapshotPath)
+	logger.WithFields(logrus.Fields{"plugin_slug": pluginSlug, "snapshot_path": snapshotPath}).Info("Plugin activated successfully with snapshot")
 
 	cms.sendSuccessResponse(w, plugin, http.StatusOK)
 }
@@ -1004,14 +980,14 @@ func (cms *CMS) handleDeactivatePlugin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if plugin.Status == "inactive" {
-		logger.Info("Plugin already inactive", "plugin_slug", pluginSlug)
+		logger.WithFields(logrus.Fields{"plugin_slug": pluginSlug}).Info("Plugin already inactive")
 		cms.sendSuccessResponse(w, plugin, http.StatusOK)
 		return
 	}
 
 	// Delete snapshot files
 	if err := cms.vmManager.DeleteSnapshot(pluginSlug); err != nil {
-		logger.Warn("Failed to delete snapshot during deactivation", "plugin_slug", pluginSlug, "error", err)
+		logger.WithFields(logrus.Fields{"plugin_slug": pluginSlug, "error": err}).Warn("Failed to delete snapshot during deactivation")
 		// Continue with deactivation even if snapshot deletion fails
 	}
 
@@ -1020,12 +996,12 @@ func (cms *CMS) handleDeactivatePlugin(w http.ResponseWriter, r *http.Request) {
 
 	// Save to registry
 	if err := cms.savePlugins(); err != nil {
-		logger.Error("Failed to save plugins after deactivation", "error", err)
+		logger.WithFields(logrus.Fields{"error": err}).Error("Failed to save plugins after deactivation")
 		cms.sendErrorResponse(w, "Failed to save plugin state", http.StatusInternalServerError)
 		return
 	}
 
-	logger.Info("Plugin deactivated successfully", "plugin_slug", pluginSlug)
+	logger.WithFields(logrus.Fields{"plugin_slug": pluginSlug}).Info("Plugin deactivated successfully")
 
 	cms.sendSuccessResponse(w, plugin, http.StatusOK)
 }
@@ -1041,7 +1017,7 @@ func (cms *CMS) handleExecuteAction(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
-		logger.Error("Failed to parse execute action request body", "error", err)
+		logger.WithFields(logrus.Fields{"error": err}).Error("Failed to parse execute action request body")
 		cms.sendErrorResponse(w, "Invalid request body. Expected: {\"action\":\"hook.name\",\"payload\":{...}}", http.StatusBadRequest)
 		return
 	}
@@ -1053,7 +1029,7 @@ func (cms *CMS) handleExecuteAction(w http.ResponseWriter, r *http.Request) {
 	}
 
 	actionHook := requestBody.Action
-	logger.Debug("Executing action", "action_hook", actionHook)
+	logger.WithFields(logrus.Fields{"action_hook": actionHook}).Debug("Executing action")
 
 	cms.mutex.RLock()
 
@@ -1085,14 +1061,15 @@ func (cms *CMS) handleExecuteAction(w http.ResponseWriter, r *http.Request) {
 	cms.mutex.RUnlock()
 
 	if len(pluginActions) == 0 {
-		logger.Warn("No active plugins found for action", "action_hook", actionHook)
+		logger.WithFields(logrus.Fields{"action_hook": actionHook}).Warn("No active plugins found for action")
 		cms.sendErrorResponse(w, fmt.Sprintf("No plugins registered for action: %s", actionHook), http.StatusNotFound)
 		return
 	}
 
-	logger.Info("Executing action across plugins",
-		"action_hook", actionHook,
-		"plugin_count", len(pluginActions))
+	logger.WithFields(logrus.Fields{
+		"action_hook":  actionHook,
+		"plugin_count": len(pluginActions),
+	}).Info("Executing action across plugins")
 
 	// Execute action on all plugins that hook to it
 	results := make([]ActionExecutionResult, 0, len(pluginActions))
@@ -1100,10 +1077,7 @@ func (cms *CMS) handleExecuteAction(w http.ResponseWriter, r *http.Request) {
 	for _, pa := range pluginActions {
 		result, err := cms.executePluginAction(pa.Plugin, pa.Action, actionHook, requestBody.Payload)
 		if err != nil {
-			logger.Error("Failed to execute action on plugin",
-				"plugin_slug", pa.Plugin.Slug,
-				"action_hook", actionHook,
-				"error", err)
+			logger.WithFields(logrus.Fields{"plugin_slug": pa.Plugin.Slug, "action_hook": actionHook, "error": err}).Error("Failed to execute action on plugin")
 
 			results = append(results, ActionExecutionResult{
 				PluginSlug: pa.Plugin.Slug,
@@ -1184,19 +1158,20 @@ func (cms *CMS) executePluginAction(plugin *Plugin, action PluginAction, hook st
 	// Use plugin slug as instance ID for consistency
 	instanceID := plugin.Slug
 
-	logger.Debug("Starting VM for action execution",
-		"plugin_slug", plugin.Slug,
-		"action_hook", hook,
-		"has_snapshot", cms.vmManager.HasSnapshot(plugin.Slug),
-		"instance_id", instanceID)
+	logger.WithFields(logrus.Fields{
+		"plugin_slug":  plugin.Slug,
+		"action_hook":  hook,
+		"has_snapshot": cms.vmManager.HasSnapshot(plugin.Slug),
+		"instance_id":  instanceID,
+	}).Debug("Starting VM for action execution")
 
 	var err error
 	// Try snapshot resumption first (fast ~100-200ms), fallback to regular start
 	if cms.vmManager.HasSnapshot(plugin.Slug) {
-		logger.Debug("Using snapshot resumption for fast startup", "plugin_slug", plugin.Slug)
+		logger.WithFields(logrus.Fields{"plugin_slug": plugin.Slug}).Debug("Using snapshot resumption for fast startup")
 		err = cms.vmManager.ResumeFromSnapshot(instanceID, plugin)
 	} else {
-		logger.Debug("No snapshot available, using regular VM startup", "plugin_slug", plugin.Slug)
+		logger.WithFields(logrus.Fields{"plugin_slug": plugin.Slug}).Debug("No snapshot available, using regular VM startup")
 		err = cms.vmManager.StartVM(instanceID, plugin)
 	}
 
@@ -1209,7 +1184,7 @@ func (cms *CMS) executePluginAction(plugin *Plugin, action PluginAction, hook st
 	// Clean up VM after execution
 	defer func() {
 		if stopErr := cms.vmManager.StopVM(instanceID); stopErr != nil {
-			logger.Error("Failed to stop VM after action execution", "instance_id", instanceID, "error", stopErr)
+			logger.WithFields(logrus.Fields{"instance_id": instanceID, "error": stopErr}).Error("Failed to stop VM after action execution")
 		}
 	}()
 
@@ -1247,12 +1222,13 @@ func (cms *CMS) executePluginAction(plugin *Plugin, action PluginAction, hook st
 	result.Result = response
 	result.ExecutionTime = time.Since(start)
 
-	logger.Info("Action executed successfully",
-		"plugin_slug", plugin.Slug,
-		"action_hook", hook,
-		"vm_ip", vmIP,
-		"execution_time_ms", result.ExecutionTime.Milliseconds(),
-		"used_snapshot", cms.vmManager.HasSnapshot(plugin.Slug))
+	logger.WithFields(logrus.Fields{
+		"plugin_slug":       plugin.Slug,
+		"action_hook":       hook,
+		"vm_ip":             vmIP,
+		"execution_time_ms": result.ExecutionTime.Milliseconds(),
+		"used_snapshot":     cms.vmManager.HasSnapshot(plugin.Slug),
+	}).Info("Action executed successfully")
 
 	return result, nil
 }
@@ -1379,7 +1355,7 @@ func copyFile(src, dst string) error {
 
 // verifyPluginHealth starts a temporary VM and checks the plugin's health endpoint
 func (cms *CMS) verifyPluginHealth(plugin *Plugin) error {
-	logger.Debug("Starting health check VM", "plugin_slug", plugin.Slug)
+	logger.WithFields(logrus.Fields{"plugin_slug": plugin.Slug}).Debug("Starting health check VM")
 
 	// Generate temporary instance ID for health check
 	healthCheckID := "health-" + plugin.Slug
@@ -1393,7 +1369,7 @@ func (cms *CMS) verifyPluginHealth(plugin *Plugin) error {
 	// Clean up VM after health check
 	defer func() {
 		if stopErr := cms.vmManager.StopVM(healthCheckID); stopErr != nil {
-			logger.Error("Failed to stop health check VM", "instance_id", healthCheckID, "error", stopErr)
+			logger.WithFields(logrus.Fields{"instance_id": healthCheckID, "error": stopErr}).Error("Failed to stop health check VM")
 		}
 	}()
 
@@ -1404,14 +1380,11 @@ func (cms *CMS) verifyPluginHealth(plugin *Plugin) error {
 	}
 
 	if err := cms.healthCheckWithRetries(vmIP, plugin.Slug, 15, 1*time.Second); err != nil {
-		logger.Error("VM health check failed during activation after retries",
-			"plugin_slug", plugin.Slug,
-			"attempts", 15,
-			"error", err)
+		logger.WithFields(logrus.Fields{"plugin_slug": plugin.Slug, "attempts": 15, "error": err}).Error("VM health check failed during activation after retries")
 		return fmt.Errorf("plugin failed health check after %d attempts", 15)
 	}
 
-	logger.Info("Plugin health check passed", "plugin_slug", plugin.Slug)
+	logger.WithFields(logrus.Fields{"plugin_slug": plugin.Slug}).Info("Plugin health check passed")
 	return nil
 }
 
@@ -1441,16 +1414,13 @@ func setupLogger() error {
 	multiWriter := io.MultiWriter(os.Stdout, file)
 
 	// Create JSON handler for structured logging
-	handler := slog.NewJSONHandler(multiWriter, &slog.HandlerOptions{
-		Level:     slog.LevelDebug,
-		AddSource: true,
-	})
-
-	// Create logger
-	logger = slog.New(handler)
+	handler := logrus.New()
+	handler.SetFormatter(&logrus.JSONFormatter{})
+	handler.SetOutput(multiWriter)
+	handler.SetLevel(logrus.DebugLevel)
 
 	// Set as default logger
-	slog.SetDefault(logger)
+	logger = handler
 
 	// Initialize HTTP client with optimized settings
 	httpClient = &http.Client{
@@ -1462,12 +1432,12 @@ func setupLogger() error {
 		},
 	}
 
-	logger.Info("Logger and HTTP client initialized",
-		"log_file", logFile,
-		"level", "debug",
-		"http_timeout", DefaultHTTPTimeout,
-		"timestamp", time.Now().Format(time.RFC3339),
-	)
+	logger.WithFields(logrus.Fields{
+		"log_file":     logFile,
+		"level":        "debug",
+		"http_timeout": DefaultHTTPTimeout,
+		"timestamp":    time.Now().Format(time.RFC3339),
+	}).Info("Logger and HTTP client initialized")
 
 	return nil
 }
@@ -1529,10 +1499,10 @@ func main() {
 		log.Fatal("Failed to setup logger:", err)
 	}
 
-	logger.Info("Starting CMS application",
-		"version", "1.0.0",
-		"timestamp", time.Now().Format(time.RFC3339),
-	)
+	logger.WithFields(logrus.Fields{
+		"version":   "1.0.0",
+		"timestamp": time.Now().Format(time.RFC3339),
+	}).Info("Starting CMS application")
 
 	cms := NewCMS()
 
@@ -1541,14 +1511,14 @@ func main() {
 		port = DefaultPort
 	}
 
-	logger.Info("CMS configuration",
-		"port", port,
-		"firecracker_path", os.Getenv("FIRECRACKER_PATH"),
-		"kernel_path", os.Getenv("KERNEL_PATH"),
-	)
+	logger.WithFields(logrus.Fields{
+		"port":             port,
+		"firecracker_path": os.Getenv("FIRECRACKER_PATH"),
+		"kernel_path":      os.Getenv("KERNEL_PATH"),
+	}).Info("CMS configuration")
 
 	if err := cms.Start(port); err != nil {
-		logger.Error("Failed to start CMS", "error", err)
+		logger.WithFields(logrus.Fields{"error": err}).Error("Failed to start CMS")
 		log.Fatal(err)
 	}
 }
