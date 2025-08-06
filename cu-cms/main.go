@@ -354,11 +354,15 @@ func (cms *CMS) handleUploadPlugin(w http.ResponseWriter, r *http.Request) {
 	// Remove existing plugin file if it exists (for updates)
 	os.Remove(rootfsPath)
 
-	if err := os.Rename(rootfsTempPath, rootfsPath); err != nil {
-		logger.Error("Failed to move rootfs", "error", err)
+	// Copy rootfs file (can't use rename due to potential cross-device link)
+	if err := copyFile(rootfsTempPath, rootfsPath); err != nil {
+		logger.Error("Failed to copy rootfs", "error", err)
 		http.Error(w, "Failed to install plugin rootfs", http.StatusInternalServerError)
 		return
 	}
+
+	// Remove temp file after successful copy
+	os.Remove(rootfsTempPath)
 
 	logger.Debug("Plugin extracted successfully", "plugin_slug", metadata.Slug, "rootfs_path", rootfsPath)
 
@@ -1216,6 +1220,24 @@ func (cms *CMS) parsePluginJson(jsonPath string) (*Plugin, error) {
 	}, nil
 }
 
+// copyFile copies a file from src to dst
+func copyFile(src, dst string) error {
+	sourceFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer sourceFile.Close()
+
+	destFile, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer destFile.Close()
+
+	_, err = destFile.ReadFrom(sourceFile)
+	return err
+}
+
 // verifyPluginHealth starts a temporary VM and checks the plugin's health endpoint
 func (cms *CMS) verifyPluginHealth(plugin *Plugin) error {
 	logger.Debug("Starting health check VM", "plugin_slug", plugin.Slug)
@@ -1242,9 +1264,13 @@ func (cms *CMS) verifyPluginHealth(plugin *Plugin) error {
 		return fmt.Errorf("VM IP not found for health check instance %s", healthCheckID)
 	}
 
-	// Try to reach health endpoint with retries
-	maxRetries := 10
-	retryDelay := 500 * time.Millisecond
+	// Try to reach health endpoint with retries (give Flask more time to start)
+	maxRetries := 15              // Increased from 10
+	retryDelay := 1 * time.Second // Increased from 500ms
+
+	// Initial wait for Flask to fully start
+	logger.Debug("Waiting for Flask to start", "plugin_slug", plugin.Slug)
+	time.Sleep(3 * time.Second)
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		logger.Debug("Health check attempt",
