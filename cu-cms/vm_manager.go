@@ -71,7 +71,7 @@ func (vm *VMManager) StartVM(instanceID string, plugin *Plugin) error {
 
 	logger.Info("Starting VM",
 		"instance_id", instanceID,
-		"plugin_id", plugin.ID,
+		"plugin_slug", plugin.Slug,
 		"plugin_name", plugin.Name,
 		"rootfs_path", plugin.RootFSPath,
 		"kernel_path", vm.kernelPath,
@@ -221,7 +221,7 @@ func (vm *VMManager) StartVM(instanceID string, plugin *Plugin) error {
 
 	logger.Info("VM started successfully",
 		"instance_id", instanceID,
-		"plugin_id", plugin.ID,
+		"plugin_slug", plugin.Slug,
 		"plugin_name", plugin.Name,
 		"vcpu_count", 1,
 		"memory_mib", 128,
