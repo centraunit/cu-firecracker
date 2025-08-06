@@ -368,6 +368,10 @@ func exportExt4(image, out string, sizeMB int) error {
 	}
 
 	containerName := "exp-" + strings.ReplaceAll(image, "/", "_")
+
+	// Clean up any existing container with the same name
+	exec.Command("docker", "rm", containerName).Run()
+
 	if err := exec.Command("docker", "create", "--name", containerName, image).Run(); err != nil {
 		return fmt.Errorf("failed to create container for export: %w", err)
 	}
