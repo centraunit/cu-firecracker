@@ -39,18 +39,20 @@ var (
 	verbose bool
 
 	rootCmd = &cobra.Command{
-		Use:   "cms-starter",
-		Short: "CMS Starter – Run your Firecracker‐isolated CMS",
+		Use:          "cms-starter",
+		Short:        "CMS Starter – Run your Firecracker‐isolated CMS",
+		SilenceUsage: true,
 	}
-	startCmd   = &cobra.Command{Use: "start", Short: "Start CMS", RunE: runStart}
-	stopCmd    = &cobra.Command{Use: "stop", Short: "Stop CMS", RunE: runStop}
-	restartCmd = &cobra.Command{Use: "restart", Short: "Restart CMS", RunE: runRestart}
-	statusCmd  = &cobra.Command{Use: "status", Short: "Status of CMS", RunE: runStatus}
-	pluginCmd  = &cobra.Command{Use: "plugin", Short: "Plugin management"}
+	startCmd   = &cobra.Command{Use: "start", Short: "Start CMS", RunE: runStart, SilenceUsage: true}
+	stopCmd    = &cobra.Command{Use: "stop", Short: "Stop CMS", RunE: runStop, SilenceUsage: true}
+	restartCmd = &cobra.Command{Use: "restart", Short: "Restart CMS", RunE: runRestart, SilenceUsage: true}
+	statusCmd  = &cobra.Command{Use: "status", Short: "Status of CMS", RunE: runStatus, SilenceUsage: true}
+	pluginCmd  = &cobra.Command{Use: "plugin", Short: "Plugin management", SilenceUsage: true}
 	buildCmd   = &cobra.Command{
-		Use:   "build",
-		Short: "Build plugin into bootable ext4",
-		RunE:  runPluginBuild,
+		Use:          "build",
+		Short:        "Build plugin into bootable ext4",
+		RunE:         runPluginBuild,
+		SilenceUsage: true,
 	}
 )
 
@@ -59,7 +61,7 @@ func init() {
 	startCmd.Flags().IntVarP(&port, "port", "p", 80, "CMS port")
 	startCmd.Flags().StringVarP(&dataDir, "data-dir", "d", "./cms-data", "Data directory")
 	buildCmd.Flags().String("plugin", "", "Plugin folder (required)")
-	buildCmd.Flags().Int("size", 200, "Ext4 filesystem size in MB")
+	buildCmd.Flags().Int("size", 200, "Ext4 filesystem size in MB (200-800, try 400 if build fails)")
 	buildCmd.MarkFlagRequired("plugin")
 	pluginCmd.AddCommand(buildCmd)
 	rootCmd.AddCommand(startCmd, stopCmd, restartCmd, statusCmd, pluginCmd)
@@ -126,21 +128,38 @@ func runStatus(cmd *cobra.Command, _ []string) error {
 func runPluginBuild(cmd *cobra.Command, _ []string) error {
 	pluginDir, _ := cmd.Flags().GetString("plugin")
 	sizeMB, _ := cmd.Flags().GetInt("size")
+
 	fmt.Printf("Building plugin from: %s\n", pluginDir)
 	manifest, err := readManifest(pluginDir)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to read plugin manifest: %w", err)
 	}
+
+	// Provide size recommendations
+	if sizeMB == 200 { // Default size, provide recommendations
+		fmt.Printf("ℹ️  Info: Using default 200MB filesystem\n")
+		fmt.Printf("   If build fails due to space issues, try --size 400 or --size 500\n")
+	} else {
+		fmt.Printf("ℹ️  Info: Using %dMB filesystem\n", sizeMB)
+	}
+
 	buildName := fmt.Sprintf("%s-%s", sanitize(manifest.Name), manifest.Version)
 	image := "plugin-" + buildName
+
+	fmt.Printf("Building Docker image: %s\n", image)
 	if err := dockerBuild(pluginDir, image); err != nil {
-		return err
+		return fmt.Errorf("failed to build Docker image: %w", err)
 	}
+
 	outPath := filepath.Join(pluginDir, "build", buildName+".ext4")
+	fmt.Printf("Exporting to: %s\n", outPath)
+
 	if err := exportExt4(image, outPath, sizeMB); err != nil {
+		_ = dockerRemove(image) // Clean up on failure
 		return err
 	}
-	fmt.Println("Plugin exported:", outPath)
+
+	fmt.Printf("✅ Plugin built successfully: %s\n", outPath)
 	_ = dockerRemove(image)
 	return nil
 }
@@ -251,46 +270,75 @@ func dockerBuild(dir, image string) error {
 
 func exportExt4(image, out string, sizeMB int) error {
 	if err := os.MkdirAll(filepath.Dir(out), 0755); err != nil {
-		return err
+		return fmt.Errorf("failed to create output directory: %w", err)
 	}
+
 	containerName := "exp-" + strings.ReplaceAll(image, "/", "_")
 	if err := exec.Command("docker", "create", "--name", containerName, image).Run(); err != nil {
-		return err
+		return fmt.Errorf("failed to create container for export: %w", err)
 	}
 	defer exec.Command("docker", "rm", containerName).Run()
 
+	fmt.Printf("Creating %dMB ext4 filesystem...\n", sizeMB)
 	if err := exec.Command("dd", "if=/dev/zero", "of="+out, "bs=1M", fmt.Sprint("count=", sizeMB)).Run(); err != nil {
-		return err
+		return fmt.Errorf("failed to create filesystem image: %w", err)
 	}
 	if err := exec.Command("mkfs.ext4", "-F", out).Run(); err != nil {
-		return err
+		return fmt.Errorf("failed to format ext4 filesystem: %w", err)
 	}
 
 	tmp, err := os.MkdirTemp("", "mnt-")
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create temp directory: %w", err)
 	}
 	defer os.RemoveAll(tmp)
+
+	fmt.Printf("Mounting filesystem at %s...\n", tmp)
 	if err := exec.Command("sudo", "mount", "-o", "loop", out, tmp).Run(); err != nil {
-		return err
+		return fmt.Errorf("failed to mount filesystem: %w", err)
 	}
 	defer exec.Command("sudo", "umount", tmp).Run()
 
+	fmt.Printf("Extracting container contents...\n")
 	exportCmd := exec.Command("docker", "export", containerName)
 	tarCmd := exec.Command("sudo", "tar", "-xf", "-", "-C", tmp)
 
 	tarCmd.Stdin, _ = exportCmd.StdoutPipe()
 	var stderr bytes.Buffer
 	tarCmd.Stderr = &stderr
+
 	if err := tarCmd.Start(); err != nil {
-		return fmt.Errorf("extract start: %v", err)
+		return fmt.Errorf("failed to start extraction: %w", err)
 	}
 	if err := exportCmd.Run(); err != nil {
-		return fmt.Errorf("export container: %w", err)
+		return fmt.Errorf("failed to export container: %w", err)
 	}
 	if err := tarCmd.Wait(); err != nil {
-		return fmt.Errorf("untar: %v (%s)", err, stderr.String())
+		errorOutput := stderr.String()
+
+		// Check for common errors and provide helpful messages
+		if strings.Contains(errorOutput, "No space left on device") {
+			return fmt.Errorf("filesystem too small (%dMB) for plugin contents.\n"+
+				"💡 Solution: Increase filesystem size with --size flag\n"+
+				"   Try: --size 400 (400MB) or --size 500 (500MB)\n"+
+				"   Larger plugins may need 800MB or more\n"+
+				"Original error: %v", sizeMB, err)
+		}
+
+		if strings.Contains(errorOutput, "Cannot mkdir") ||
+			strings.Contains(errorOutput, "Cannot create") ||
+			strings.Contains(errorOutput, "Cannot open") ||
+			strings.Contains(errorOutput, "Cannot hard link") {
+			return fmt.Errorf("extraction failed - filesystem (%dMB) appears too small.\n"+
+				"💡 Solution: Increase filesystem size with --size flag\n"+
+				"   Recommended sizes: --size 400, --size 500, or --size 800\n"+
+				"Original error: %v", sizeMB, err)
+		}
+
+		return fmt.Errorf("extraction failed: %v\nError details: %s", err, errorOutput)
 	}
+
+	fmt.Printf("Successfully created plugin filesystem: %s\n", out)
 	return nil
 }
 

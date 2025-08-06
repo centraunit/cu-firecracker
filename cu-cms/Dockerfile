@@ -54,20 +54,20 @@ RUN mkdir -p /opt/kernel && \
 
 
 
-# Install CNI plugins
-ENV CNI_VERSION=v1.7.1
-RUN mkdir -p /opt/cni/bin && \
-    wget -O /opt/cni/bin/cni-plugins.tgz https://github.com/containernetworking/plugins/releases/download/${CNI_VERSION}/cni-plugins-linux-amd64-${CNI_VERSION}.tgz && \
-    tar -xzf /opt/cni/bin/cni-plugins.tgz -C /opt/cni/bin && rm /opt/cni/bin/cni-plugins.tgz
-ENV PATH=$PATH:/opt/cni/bin
+# CNI plugins disabled - using manual network setup
+# ENV CNI_VERSION=v1.7.1
+# RUN mkdir -p /opt/cni/bin && \
+#     wget -O /opt/cni/bin/cni-plugins.tgz https://github.com/containernetworking/plugins/releases/download/${CNI_VERSION}/cni-plugins-linux-amd64-${CNI_VERSION}.tgz && \
+#     tar -xzf /opt/cni/bin/cni-plugins.tgz -C /opt/cni/bin && rm /opt/cni/bin/cni-plugins.tgz
+# ENV PATH=$PATH:/opt/cni/bin
 
-# Build tc-redirect-tap plugin
-RUN git clone https://github.com/awslabs/tc-redirect-tap.git /tmp/tc-redirect-tap && \
-    cd /tmp/tc-redirect-tap && make install && rm -rf /tmp/tc-redirect-tap
+# tc-redirect-tap plugin disabled - using manual network setup  
+# RUN git clone https://github.com/awslabs/tc-redirect-tap.git /tmp/tc-redirect-tap && \
+#     cd /tmp/tc-redirect-tap && make install && rm -rf /tmp/tc-redirect-tap
 
-# CNI config
-RUN mkdir -p /etc/cni/conf.d && \
-    echo '{"cniVersion":"1.0.0","name":"fcnet","plugins":[{"type":"ptp","ipMasq":true,"ipam":{"type":"host-local","subnet":"192.168.127.0/24","resolvConf":"/etc/resolv.conf"}},{"type":"firewall"},{"type":"tc-redirect-tap"}]}' > /etc/cni/conf.d/fcnet.conflist
+# CNI config disabled - using manual network setup
+# RUN mkdir -p /etc/cni/conf.d && \
+#     echo '{"cniVersion":"1.1.0","name":"fcnet","plugins":[{"type":"bridge","name":"fcnet-bridge","bridge":"fcnetbridge0","isDefaultGateway":true,"ipMasq":true,"hairpinMode":true,"ipam":{"type":"host-local","subnet":"192.168.127.0/24","resolvConf":"/etc/resolv.conf"}},{"type":"firewall"},{"type":"tc-redirect-tap"}]}' > /etc/cni/conf.d/fcnet.conflist
 
 
 

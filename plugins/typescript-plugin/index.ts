@@ -1,10 +1,10 @@
-import express from 'express';
-import { Request, Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
+import express from 'express';
+import { Request, Response } from 'express';
 
 const app = express();
-const port = 8080;
+const port = 80;
 
 // Enable JSON parsing
 app.use(express.json());
@@ -139,246 +139,116 @@ function updateAnalytics(): void {
 // Load data on startup
 loadData();
 
-// Health check endpoint
-app.get('/health', (req: Request, res: Response) => {
-    res.json({
-        status: 'healthy',
-        timestamp: new Date().toISOString(),
-        plugin: 'typescript-cms-plugin',
-        version: '2.0.0',
-        uptime: process.uptime(),
-        memory: process.memoryUsage(),
-        dataFile: fs.existsSync(DATA_FILE) ? 'exists' : 'missing'
-    });
+// Start the HTTP server
+app.listen(port, () => {
+    console.log(`CMS Plugin HTTP server listening on port ${port}`);
 });
 
-// Main plugin info
-app.get('/', (req: Request, res: Response) => {
-    res.json({
-        name: 'TypeScript CMS Plugin v2',
-        version: '2.0.0',
-        description: 'A production-ready TypeScript CMS plugin with customer management',
-        endpoints: [
-            'GET  /health',
-            'GET  /',
-            'GET  /customers',
-            'GET  /customers/:id',
-            'POST /customers',
-            'PUT  /customers/:id',
-            'DELETE /customers/:id',
-            'GET  /analytics',
-            'POST /execute'
-        ],
-        features: [
-            'Data persistence',
-            'Advanced analytics',
-            'Customer tagging',
-            'Company tracking',
-            'Phone number support'
-        ]
-    });
-});
-
-// Get all customers with optional filtering
+// Handle incoming requests
 app.get('/customers', (req: Request, res: Response) => {
-    const { status, company, tag } = req.query;
-    let filteredCustomers = [...cmsData.customers];
-    
-    if (status) {
-        filteredCustomers = filteredCustomers.filter(c => c.status === status);
-    }
-    
-    if (company) {
-        filteredCustomers = filteredCustomers.filter(c => c.company?.toLowerCase().includes(company.toString().toLowerCase()));
-    }
-    
-    if (tag) {
-        filteredCustomers = filteredCustomers.filter(c => c.tags?.includes(tag.toString()));
-    }
-    
     res.json({
         success: true,
-        data: filteredCustomers,
-        count: filteredCustomers.length,
-        total: cmsData.customers.length,
+        action: 'get_customers',
+        data: cmsData.customers,
+        count: cmsData.customers.length,
         timestamp: new Date().toISOString()
     });
 });
 
-// Get customer by ID
-app.get('/customers/:id', (req: Request, res: Response) => {
-    const id = parseInt(req.params.id);
-    const customer = cmsData.customers.find(c => c.id === id);
-    
-    if (!customer) {
-        return res.status(404).json({
-            success: false,
-            error: 'Customer not found',
-            id: id
-        });
-    }
-    
-    res.json({
-        success: true,
-        data: customer,
-        timestamp: new Date().toISOString()
-    });
-});
-
-// Add new customer
 app.post('/customers', (req: Request, res: Response) => {
-    const { name, email, status = 'active', phone, company, tags } = req.body;
-    
+    const { name, email, status, phone, company, tags } = req.body;
+
     if (!name || !email) {
-        return res.status(400).json({
+        res.status(400).json({
             success: false,
-            error: 'Name and email are required'
+            error: 'Name and email are required for add_customer action'
         });
+        return;
     }
-    
-    // Check if email already exists
+
     if (cmsData.customers.find(c => c.email === email)) {
-        return res.status(409).json({
+        res.status(409).json({
             success: false,
             error: 'Customer with this email already exists'
         });
+        return;
     }
-    
+
     const now = new Date().toISOString();
     const newCustomer: Customer = {
         id: ++cmsData.lastCustomerId,
-        name,
-        email,
-        status,
+        name: name,
+        email: email,
+        status: status || 'active',
         createdAt: now,
         updatedAt: now,
-        phone,
-        company,
+        phone: phone,
+        company: company,
         tags: tags || []
     };
-    
+
     cmsData.customers.push(newCustomer);
     updateAnalytics();
     saveData();
-    
-    res.status(201).json({
+
+    res.json({
         success: true,
+        action: 'add_customer',
         data: newCustomer,
-        message: 'Customer created successfully',
+        message: 'Customer added successfully',
         timestamp: now
     });
 });
 
-// Update customer
-app.put('/customers/:id', (req: Request, res: Response) => {
-    const id = parseInt(req.params.id);
-    const customerIndex = cmsData.customers.findIndex(c => c.id === id);
-    
-    if (customerIndex === -1) {
-        return res.status(404).json({
-            success: false,
-            error: 'Customer not found',
-            id: id
-        });
-    }
-    
-    const { name, email, status, phone, company, tags } = req.body;
-    const updatedCustomer = {
-        ...cmsData.customers[customerIndex],
-        ...(name && { name }),
-        ...(email && { email }),
-        ...(status && { status }),
-        ...(phone !== undefined && { phone }),
-        ...(company !== undefined && { company }),
-        ...(tags !== undefined && { tags }),
-        updatedAt: new Date().toISOString()
-    };
-    
-    cmsData.customers[customerIndex] = updatedCustomer;
-    updateAnalytics();
-    saveData();
-    
-    res.json({
-        success: true,
-        data: updatedCustomer,
-        message: 'Customer updated successfully',
-        timestamp: new Date().toISOString()
-    });
-});
-
-// Delete customer
-app.delete('/customers/:id', (req: Request, res: Response) => {
-    const id = parseInt(req.params.id);
-    const customerIndex = cmsData.customers.findIndex(c => c.id === id);
-    
-    if (customerIndex === -1) {
-        return res.status(404).json({
-            success: false,
-            error: 'Customer not found',
-            id: id
-        });
-    }
-    
-    const deletedCustomer = cmsData.customers.splice(customerIndex, 1)[0];
-    updateAnalytics();
-    saveData();
-    
-    res.json({
-        success: true,
-        data: deletedCustomer,
-        message: 'Customer deleted successfully',
-        timestamp: new Date().toISOString()
-    });
-});
-
-// Get analytics
 app.get('/analytics', (req: Request, res: Response) => {
     res.json({
         success: true,
+        action: 'get_analytics',
         data: cmsData.analytics,
         timestamp: new Date().toISOString()
     });
-});
+}); 
 
-// Execute plugin with specific action
+// Main execute endpoint that the CMS calls
 app.post('/execute', (req: Request, res: Response) => {
     const { action, data } = req.body;
     
-    console.log(`Plugin executing action: ${action}`, data);
+    console.log(`Executing action: ${action}`, data);
     
     try {
-    switch (action) {
-        case 'get_customers':
-            res.json({
-                success: true,
-                action: 'get_customers',
+        switch (action) {
+            case 'get_customers':
+                res.json({
+                    success: true,
+                    action: 'get_customers',
                     data: cmsData.customers,
                     count: cmsData.customers.length,
-                timestamp: new Date().toISOString()
-            });
-            break;
-            
-        case 'add_customer':
-            if (!data || !data.name || !data.email) {
-                return res.status(400).json({
-                    success: false,
-                    error: 'Name and email are required for add_customer action'
+                    timestamp: new Date().toISOString()
                 });
-            }
-            
-                // Check if email already exists
+                break;
+                
+            case 'add_customer':
+                if (!data || !data.name || !data.email) {
+                    res.status(400).json({
+                        success: false,
+                        error: 'Name and email are required for add_customer action'
+                    });
+                    return;
+                }
+                
                 if (cmsData.customers.find(c => c.email === data.email)) {
-                    return res.status(409).json({
+                    res.status(409).json({
                         success: false,
                         error: 'Customer with this email already exists'
                     });
+                    return;
                 }
                 
                 const now = new Date().toISOString();
                 const newCustomer: Customer = {
                     id: ++cmsData.lastCustomerId,
-                name: data.name,
-                email: data.email,
+                    name: data.name,
+                    email: data.email,
                     status: data.status || 'active',
                     createdAt: now,
                     updatedAt: now,
@@ -390,152 +260,42 @@ app.post('/execute', (req: Request, res: Response) => {
                 cmsData.customers.push(newCustomer);
                 updateAnalytics();
                 saveData();
-            
-            res.json({
-                success: true,
-                action: 'add_customer',
-                data: newCustomer,
-                message: 'Customer added successfully',
+                
+                res.json({
+                    success: true,
+                    action: 'add_customer',
+                    data: newCustomer,
+                    message: 'Customer added successfully',
                     timestamp: now
-            });
-            break;
-            
-        case 'get_analytics':
-            res.json({
-                success: true,
-                action: 'get_analytics',
+                });
+                break;
+                
+            case 'get_analytics':
+                res.json({
+                    success: true,
+                    action: 'get_analytics',
                     data: cmsData.analytics,
                     timestamp: new Date().toISOString()
                 });
                 break;
                 
-            case 'search_customers':
-                const { query, status, company } = data || {};
-                let searchResults = [...cmsData.customers];
-                
-                if (query) {
-                    const searchTerm = query.toLowerCase();
-                    searchResults = searchResults.filter(c => 
-                        c.name.toLowerCase().includes(searchTerm) ||
-                        c.email.toLowerCase().includes(searchTerm) ||
-                        c.company?.toLowerCase().includes(searchTerm)
-                    );
-                }
-                
-                if (status) {
-                    searchResults = searchResults.filter(c => c.status === status);
-                }
-                
-                if (company) {
-                    searchResults = searchResults.filter(c => 
-                        c.company?.toLowerCase().includes(company.toLowerCase())
-                    );
-                }
-                
-                res.json({
-                    success: true,
-                    action: 'search_customers',
-                    data: searchResults,
-                    count: searchResults.length,
-                    query: data,
-                    timestamp: new Date().toISOString()
-                });
-                break;
-                
-            case 'get_customer_by_id':
-                const customerId = parseInt(data?.id);
-                const customer = cmsData.customers.find(c => c.id === customerId);
-                
-                if (!customer) {
-                    return res.status(404).json({
-                        success: false,
-                        action: 'get_customer_by_id',
-                        error: 'Customer not found',
-                        id: customerId
-                    });
-                }
-                
-                res.json({
-                    success: true,
-                    action: 'get_customer_by_id',
-                    data: customer,
-                    timestamp: new Date().toISOString()
-                });
-                break;
-                
-            case 'update_customer':
-                const updateId = parseInt(data?.id);
-                const updateIndex = cmsData.customers.findIndex(c => c.id === updateId);
-                
-                if (updateIndex === -1) {
-                    return res.status(404).json({
-                        success: false,
-                        action: 'update_customer',
-                        error: 'Customer not found',
-                        id: updateId
-                    });
-                }
-                
-                const updatedCustomer = {
-                    ...cmsData.customers[updateIndex],
-                    ...(data.name && { name: data.name }),
-                    ...(data.email && { email: data.email }),
-                    ...(data.status && { status: data.status }),
-                    ...(data.phone !== undefined && { phone: data.phone }),
-                    ...(data.company !== undefined && { company: data.company }),
-                    ...(data.tags !== undefined && { tags: data.tags }),
-                    updatedAt: new Date().toISOString()
-                };
-                
-                cmsData.customers[updateIndex] = updatedCustomer;
-                updateAnalytics();
-                saveData();
-                
-                res.json({
-                    success: true,
-                    action: 'update_customer',
-                    data: updatedCustomer,
-                    message: 'Customer updated successfully',
-                timestamp: new Date().toISOString()
-            });
-            break;
-            
-        default:
-            res.status(400).json({
-                success: false,
-                error: `Unknown action: ${action}`,
+            default:
+                res.status(400).json({
+                    success: false,
+                    error: `Unknown action: ${action}`,
                     availableActions: [
                         'get_customers', 
                         'add_customer', 
-                        'get_analytics',
-                        'search_customers',
-                        'get_customer_by_id',
-                        'update_customer'
+                        'get_analytics'
                     ]
                 });
         }
-    } catch (error) {
+    } catch (error: any) {
         console.error('Error executing action:', error);
         res.status(500).json({
             success: false,
             error: 'Internal server error',
             action: action
-            });
+        });
     }
-});
-
-// Start the server
-app.listen(port, '0.0.0.0', () => {
-    console.log(`TypeScript CMS Plugin v2 running on port ${port}`);
-    console.log(`Data persistence: ${DATA_FILE}`);
-    console.log(`Available endpoints:`);
-    console.log(`  GET  /health`);
-    console.log(`  GET  /`);
-    console.log(`  GET  /customers`);
-    console.log(`  GET  /customers/:id`);
-    console.log(`  POST /customers`);
-    console.log(`  PUT  /customers/:id`);
-    console.log(`  DELETE /customers/:id`);
-    console.log(`  GET  /analytics`);
-    console.log(`  POST /execute`);
 }); 

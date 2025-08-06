@@ -1,0 +1,36 @@
+{
+  "slug": "python-performance",
+  "name": "Python Performance Plugin",
+  "version": "1.0.0",
+  "description": "High-performance Python plugin with e-commerce actions",
+  "author": "CU Team",
+  "runtime": "python",
+  "actions": {
+    "product_created": {
+      "name": "Product Created Handler",
+      "description": "Handles product creation events",
+      "hooks": ["product.created", "product.updated"],
+      "method": "POST",
+      "endpoint": "/actions/product",
+      "priority": 10
+    },
+    "order_processing": {
+      "name": "Order Processing Handler", 
+      "description": "Handles order processing events",
+      "hooks": ["order.created", "order.updated", "order.paid"],
+      "method": "POST",
+      "endpoint": "/actions/order",
+      "priority": 5
+    },
+    "analytics_calculation": {
+      "name": "Analytics Calculator",
+      "description": "Calculates analytics and metrics",
+      "hooks": ["analytics.calculate", "report.generate"],
+      "method": "POST", 
+      "endpoint": "/actions/analytics",
+      "priority": 1
+    }
+  },
+  "health_endpoint": "/health",
+  "discovery_endpoint": "/actions"
+} 
