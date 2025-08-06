@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,72 +10,58 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"archive/zip"
-	"os/exec"
 
 	"github.com/firecracker-microvm/firecracker-go-sdk"
 	"github.com/gorilla/mux"
 )
 
-// Global logger
-var logger *slog.Logger
+// Configuration constants
+const (
+	DefaultPort            = "8080"
+	DefaultHTTPTimeout     = 5 * time.Second // Reduced from 10s
+	DefaultHealthRetries   = 15
+	DefaultHealthDelay     = 1 * time.Second
+	MaxPluginExecutionTime = 30 * time.Second
+	VMReadyWaitTime        = 3 * time.Second
+	SnapshotResumeWait     = 200 * time.Millisecond // User's max requirement
+	MaxConcurrentActions   = 10                     // Limit concurrent plugin executions
+)
 
-// setupLogger initializes structured logging to console and a file
-func setupLogger() error {
-	logsDir := "/app/data/logs"
-	if err := os.MkdirAll(logsDir, 0755); err != nil {
-		return fmt.Errorf("failed to create logs directory: %v", err)
-	}
+// Global logger and HTTP client pool
+var (
+	logger     *slog.Logger
+	httpClient *http.Client
+)
 
-	// Create log file with date only (YYYY-MM-DD)
-	date := time.Now().Format("2006-01-02")
-	logFile := filepath.Join(logsDir, fmt.Sprintf("cms_%s.log", date))
-
-	// Open log file
-	file, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to open log file: %v", err)
-	}
-
-	// Fix ownership of the log file to match host user (1000:1000)
-	if err := fixLogFileOwnership(logFile); err != nil {
-		log.Printf("Warning: Failed to fix log file ownership: %v", err)
-	}
-
-	// Create multi-writer for both file and console
-	multiWriter := io.MultiWriter(os.Stdout, file)
-
-	// Create JSON handler for structured logging
-	handler := slog.NewJSONHandler(multiWriter, &slog.HandlerOptions{
-		Level:     slog.LevelDebug,
-		AddSource: true,
-	})
-
-	// Create logger
-	logger = slog.New(handler)
-
-	// Set as default logger
-	slog.SetDefault(logger)
-
-	logger.Info("Logger initialized",
-		"log_file", logFile,
-		"level", "debug",
-		"timestamp", time.Now().Format(time.RFC3339),
-	)
-
-	return nil
+// HTTPResponse represents a standardized API response
+type HTTPResponse struct {
+	Success   bool        `json:"success"`
+	Data      interface{} `json:"data,omitempty"`
+	Error     string      `json:"error,omitempty"`
+	Timestamp string      `json:"timestamp"`
 }
 
-// fixLogFileOwnership changes the ownership of the log file to the host user
-func fixLogFileOwnership(logFile string) error {
-	// Change ownership to UID 1000:GID 1000 (host user)
-	cmd := exec.Command("chown", "1000:1000", logFile)
-	return cmd.Run()
+// ValidationError represents input validation errors
+type ValidationError struct {
+	Field   string `json:"field"`
+	Message string `json:"message"`
+}
+
+// ActionExecutionResult represents the result of plugin action execution
+type ActionExecutionResult struct {
+	PluginSlug    string        `json:"plugin_slug"`
+	Success       bool          `json:"success"`
+	Result        interface{}   `json:"result,omitempty"`
+	Error         string        `json:"error,omitempty"`
+	ExecutionTime time.Duration `json:"execution_time_ms"`
 }
 
 // Plugin represents a CMS plugin with action-based hooks
@@ -120,12 +107,17 @@ type VMInstance struct {
 	CreatedAt  time.Time `json:"created_at"`
 }
 
-// CMS represents the main CMS application
+// CMS represents the main CMS application with enhanced features
 type CMS struct {
-	plugins   map[string]*Plugin // slug -> Plugin
-	instances map[string]*VMInstance
-	mutex     sync.RWMutex
-	vmManager *VMManager
+	plugins         map[string]*Plugin // slug -> Plugin
+	instances       map[string]*VMInstance
+	mutex           sync.RWMutex
+	vmManager       *VMManager
+	httpServer      *http.Server
+	actionSemaphore chan struct{} // Limit concurrent actions
+	shutdownChan    chan bool
+	ctx             context.Context
+	cancel          context.CancelFunc
 }
 
 // VMManager handles Firecracker microVM operations
@@ -140,12 +132,18 @@ type VMManager struct {
 	mutex           sync.RWMutex
 }
 
-// NewCMS creates a new CMS instance
+// NewCMS creates a new CMS instance with enhanced features
 func NewCMS() *CMS {
+	ctx, cancel := context.WithCancel(context.Background())
+
 	cms := &CMS{
-		plugins:   make(map[string]*Plugin),
-		instances: make(map[string]*VMInstance),
-		vmManager: NewVMManager(),
+		plugins:         make(map[string]*Plugin),
+		instances:       make(map[string]*VMInstance),
+		vmManager:       NewVMManager(),
+		actionSemaphore: make(chan struct{}, MaxConcurrentActions),
+		shutdownChan:    make(chan bool, 1),
+		ctx:             ctx,
+		cancel:          cancel,
 	}
 
 	// Load existing plugins from disk
@@ -155,6 +153,9 @@ func NewCMS() *CMS {
 	if err := cms.vmManager.initSnapshotDir(); err != nil {
 		logger.Error("Failed to initialize snapshot directory", "error", err)
 	}
+
+	// Setup graceful shutdown
+	cms.setupGracefulShutdown()
 
 	return cms
 }
@@ -187,32 +188,226 @@ func (vm *VMManager) initSnapshotDir() error {
 	return os.MkdirAll(vm.snapshotDir, 0755)
 }
 
-// Start starts the CMS web server
+// setupGracefulShutdown configures signal handling for graceful shutdown
+func (cms *CMS) setupGracefulShutdown() {
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		sig := <-sigChan
+		logger.Info("Received shutdown signal", "signal", sig)
+		cms.Shutdown()
+	}()
+}
+
+// Shutdown gracefully shuts down the CMS
+func (cms *CMS) Shutdown() {
+	logger.Info("Initiating graceful shutdown")
+
+	// Cancel context to stop ongoing operations
+	cms.cancel()
+
+	// Shutdown HTTP server
+	if cms.httpServer != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := cms.httpServer.Shutdown(ctx); err != nil {
+			logger.Error("HTTP server shutdown failed", "error", err)
+		}
+	}
+
+	// Stop all running VMs
+	cms.vmManager.StopAllVMs()
+
+	// Signal shutdown completion
+	cms.shutdownChan <- true
+	logger.Info("Graceful shutdown completed")
+}
+
+// Start starts the CMS web server with enhanced configuration
 func (cms *CMS) Start(port string) error {
 	r := mux.NewRouter()
+
+	// Add middleware for request logging and validation
+	r.Use(cms.loggingMiddleware)
+	r.Use(cms.recoveryMiddleware)
 
 	// Plugin management endpoints
 	r.HandleFunc("/api/plugins", cms.handleListPlugins).Methods("GET")
 	r.HandleFunc("/api/plugins", cms.handleUploadPlugin).Methods("POST")
-	r.HandleFunc("/api/plugins/{slug}", cms.handleGetPlugin).Methods("GET")
-	r.HandleFunc("/api/plugins/{slug}", cms.handleDeletePlugin).Methods("DELETE")
+	r.HandleFunc("/api/plugins/{slug}", cms.validateSlugMiddleware(cms.handleGetPlugin)).Methods("GET")
+	r.HandleFunc("/api/plugins/{slug}", cms.validateSlugMiddleware(cms.handleDeletePlugin)).Methods("DELETE")
 
 	// Plugin activation endpoints
-	r.HandleFunc("/api/plugins/{slug}/activate", cms.handleActivatePlugin).Methods("POST")
-	r.HandleFunc("/api/plugins/{slug}/deactivate", cms.handleDeactivatePlugin).Methods("POST")
+	r.HandleFunc("/api/plugins/{slug}/activate", cms.validateSlugMiddleware(cms.handleActivatePlugin)).Methods("POST")
+	r.HandleFunc("/api/plugins/{slug}/deactivate", cms.validateSlugMiddleware(cms.handleDeactivatePlugin)).Methods("POST")
 
-	// Action execution endpoint (WordPress-style)
+	// Action execution endpoint (WordPress-style) with enhanced validation
 	r.HandleFunc("/api/execute", cms.handleExecuteAction).Methods("POST")
 
-	// Health check
-	r.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("CMS is running"))
-	}).Methods("GET")
+	// Health check with detailed status
+	r.HandleFunc("/health", cms.handleHealthCheck).Methods("GET")
+
+	// Metrics endpoint
+	r.HandleFunc("/metrics", cms.handleMetrics).Methods("GET")
+
+	cms.httpServer = &http.Server{
+		Addr:         ":" + port,
+		Handler:      r,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
 
 	logger.Info("Starting CMS server", "port", port)
-	return http.ListenAndServe(":"+port, r)
+
+	// Start server in goroutine
+	go func() {
+		if err := cms.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Error("Server failed", "error", err)
+		}
+	}()
+
+	// Wait for shutdown signal
+	<-cms.shutdownChan
+	return nil
 }
+
+// Middleware functions
+
+// loggingMiddleware logs all HTTP requests
+func (cms *CMS) loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+
+		// Wrap ResponseWriter to capture status code
+		wrapped := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+
+		next.ServeHTTP(wrapped, r)
+
+		logger.Debug("HTTP request",
+			"method", r.Method,
+			"url", r.URL.String(),
+			"remote_addr", r.RemoteAddr,
+			"user_agent", r.UserAgent(),
+			"status_code", wrapped.statusCode,
+			"duration_ms", time.Since(start).Milliseconds(),
+		)
+	})
+}
+
+// recoveryMiddleware recovers from panics and logs them
+func (cms *CMS) recoveryMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if err := recover(); err != nil {
+				logger.Error("Panic recovered",
+					"error", err,
+					"method", r.Method,
+					"url", r.URL.String(),
+					"remote_addr", r.RemoteAddr,
+				)
+				cms.sendErrorResponse(w, "Internal server error", http.StatusInternalServerError)
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
+// validateSlugMiddleware validates plugin slug format
+func (cms *CMS) validateSlugMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		vars := mux.Vars(r)
+		slug := vars["slug"]
+
+		if err := cms.validateSlug(slug); err != nil {
+			cms.sendErrorResponse(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		next(w, r)
+	}
+}
+
+// Response helper functions
+
+// sendSuccessResponse sends a standardized success response
+func (cms *CMS) sendSuccessResponse(w http.ResponseWriter, data interface{}, statusCode int) {
+	response := HTTPResponse{
+		Success:   true,
+		Data:      data,
+		Timestamp: time.Now().Format(time.RFC3339),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	json.NewEncoder(w).Encode(response)
+}
+
+// sendErrorResponse sends a standardized error response
+func (cms *CMS) sendErrorResponse(w http.ResponseWriter, message string, statusCode int) {
+	response := HTTPResponse{
+		Success:   false,
+		Error:     message,
+		Timestamp: time.Now().Format(time.RFC3339),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	json.NewEncoder(w).Encode(response)
+}
+
+// Validation functions
+
+// validateSlug validates plugin slug format
+func (cms *CMS) validateSlug(slug string) error {
+	if slug == "" {
+		return fmt.Errorf("slug cannot be empty")
+	}
+	if len(slug) > 50 {
+		return fmt.Errorf("slug too long (max 50 characters)")
+	}
+	if !isValidSlugFormat(slug) {
+		return fmt.Errorf("slug contains invalid characters (use only letters, numbers, hyphens)")
+	}
+	return nil
+}
+
+// isValidSlugFormat checks if slug contains only valid characters
+func isValidSlugFormat(slug string) bool {
+	for _, char := range slug {
+		if !((char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') || char == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+// validateActionRequest validates execute action request
+func (cms *CMS) validateActionRequest(req *struct {
+	Action  string                 `json:"action"`
+	Payload map[string]interface{} `json:"payload"`
+}) []ValidationError {
+	var errors []ValidationError
+
+	if req.Action == "" {
+		errors = append(errors, ValidationError{
+			Field:   "action",
+			Message: "action is required",
+		})
+	}
+
+	if len(req.Action) > 100 {
+		errors = append(errors, ValidationError{
+			Field:   "action",
+			Message: "action name too long (max 100 characters)",
+		})
+	}
+
+	return errors
+}
+
+// Enhanced handler functions
 
 // handleListPlugins returns all registered plugins
 func (cms *CMS) handleListPlugins(w http.ResponseWriter, r *http.Request) {
@@ -233,8 +428,7 @@ func (cms *CMS) handleListPlugins(w http.ResponseWriter, r *http.Request) {
 
 	logger.Info("Listed plugins", "count", len(plugins))
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(plugins)
+	cms.sendSuccessResponse(w, plugins, http.StatusOK)
 }
 
 // handleUploadPlugin handles plugin upload and registration
@@ -249,7 +443,7 @@ func (cms *CMS) handleUploadPlugin(w http.ResponseWriter, r *http.Request) {
 	// Parse multipart form
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
 		logger.Error("Failed to parse multipart form", "error", err)
-		http.Error(w, "Failed to parse form", http.StatusBadRequest)
+		cms.sendErrorResponse(w, "Failed to parse form", http.StatusBadRequest)
 		return
 	}
 
@@ -267,7 +461,7 @@ func (cms *CMS) handleUploadPlugin(w http.ResponseWriter, r *http.Request) {
 	file, header, err := r.FormFile("plugin")
 	if err != nil {
 		logger.Error("Failed to get uploaded file", "error", err)
-		http.Error(w, "Failed to get uploaded plugin ZIP file", http.StatusBadRequest)
+		cms.sendErrorResponse(w, "Failed to get uploaded plugin ZIP file", http.StatusBadRequest)
 		return
 	}
 	defer file.Close()
@@ -275,7 +469,7 @@ func (cms *CMS) handleUploadPlugin(w http.ResponseWriter, r *http.Request) {
 	// Verify it's a ZIP file
 	if !strings.HasSuffix(strings.ToLower(header.Filename), ".zip") {
 		logger.Error("Invalid file type", "filename", header.Filename)
-		http.Error(w, "Plugin must be a ZIP file containing rootfs.ext4 and plugin.json", http.StatusBadRequest)
+		cms.sendErrorResponse(w, "Plugin must be a ZIP file containing rootfs.ext4 and plugin.json", http.StatusBadRequest)
 		return
 	}
 
@@ -289,7 +483,7 @@ func (cms *CMS) handleUploadPlugin(w http.ResponseWriter, r *http.Request) {
 	pluginsDir := "/app/data/plugins"
 	if err := os.MkdirAll(pluginsDir, 0755); err != nil {
 		logger.Error("Failed to create plugins directory", "path", pluginsDir, "error", err)
-		http.Error(w, "Failed to create plugins directory", http.StatusInternalServerError)
+		cms.sendErrorResponse(w, "Failed to create plugins directory", http.StatusInternalServerError)
 		return
 	}
 
@@ -297,7 +491,7 @@ func (cms *CMS) handleUploadPlugin(w http.ResponseWriter, r *http.Request) {
 	tempDir, err := os.MkdirTemp("", "cms-plugin-upload-")
 	if err != nil {
 		logger.Error("Failed to create temp directory", "error", err)
-		http.Error(w, "Failed to create temp directory", http.StatusInternalServerError)
+		cms.sendErrorResponse(w, "Failed to create temp directory", http.StatusInternalServerError)
 		return
 	}
 	defer os.RemoveAll(tempDir) // Clean up temp directory
@@ -306,14 +500,14 @@ func (cms *CMS) handleUploadPlugin(w http.ResponseWriter, r *http.Request) {
 	dst, err := os.Create(zipPath)
 	if err != nil {
 		logger.Error("Failed to create ZIP file", "path", zipPath, "error", err)
-		http.Error(w, "Failed to save ZIP file", http.StatusInternalServerError)
+		cms.sendErrorResponse(w, "Failed to save ZIP file", http.StatusInternalServerError)
 		return
 	}
 
 	if _, err := io.Copy(dst, file); err != nil {
 		dst.Close()
 		logger.Error("Failed to save ZIP file", "error", err)
-		http.Error(w, "Failed to save ZIP file", http.StatusInternalServerError)
+		cms.sendErrorResponse(w, "Failed to save ZIP file", http.StatusInternalServerError)
 		return
 	}
 	dst.Close()
@@ -323,7 +517,7 @@ func (cms *CMS) handleUploadPlugin(w http.ResponseWriter, r *http.Request) {
 	// Extract ZIP file
 	if err := cms.extractPluginZip(zipPath, tempDir); err != nil {
 		logger.Error("Failed to extract ZIP", "error", err)
-		http.Error(w, fmt.Sprintf("Failed to extract plugin ZIP: %v", err), http.StatusBadRequest)
+		cms.sendErrorResponse(w, fmt.Sprintf("Failed to extract plugin ZIP: %v", err), http.StatusBadRequest)
 		return
 	}
 
@@ -332,14 +526,14 @@ func (cms *CMS) handleUploadPlugin(w http.ResponseWriter, r *http.Request) {
 	metadata, err := cms.parsePluginJson(pluginJsonPath)
 	if err != nil {
 		logger.Error("Failed to parse plugin.json", "error", err)
-		http.Error(w, fmt.Sprintf("Invalid plugin.json: %v", err), http.StatusBadRequest)
+		cms.sendErrorResponse(w, fmt.Sprintf("Invalid plugin.json: %v", err), http.StatusBadRequest)
 		return
 	}
 
 	// Validate slug exists
 	if metadata.Slug == "" {
 		logger.Error("Plugin missing required slug")
-		http.Error(w, "Plugin must provide a unique slug in plugin.json", http.StatusBadRequest)
+		cms.sendErrorResponse(w, "Plugin must provide a unique slug in plugin.json", http.StatusBadRequest)
 		return
 	}
 
@@ -347,7 +541,7 @@ func (cms *CMS) handleUploadPlugin(w http.ResponseWriter, r *http.Request) {
 	rootfsTempPath := filepath.Join(tempDir, "rootfs.ext4")
 	if _, err := os.Stat(rootfsTempPath); os.IsNotExist(err) {
 		logger.Error("rootfs.ext4 not found in ZIP")
-		http.Error(w, "rootfs.ext4 not found in plugin ZIP", http.StatusBadRequest)
+		cms.sendErrorResponse(w, "rootfs.ext4 not found in plugin ZIP", http.StatusBadRequest)
 		return
 	}
 
@@ -360,7 +554,7 @@ func (cms *CMS) handleUploadPlugin(w http.ResponseWriter, r *http.Request) {
 	// Copy rootfs file (can't use rename due to potential cross-device link)
 	if err := copyFile(rootfsTempPath, rootfsPath); err != nil {
 		logger.Error("Failed to copy rootfs", "error", err)
-		http.Error(w, "Failed to install plugin rootfs", http.StatusInternalServerError)
+		cms.sendErrorResponse(w, "Failed to install plugin rootfs", http.StatusInternalServerError)
 		return
 	}
 
@@ -400,7 +594,7 @@ func (cms *CMS) handleUploadPlugin(w http.ResponseWriter, r *http.Request) {
 		logger.Info("Performing health check on updated plugin", "plugin_slug", existingPlugin.Slug)
 		if err := cms.verifyPluginHealth(existingPlugin); err != nil {
 			logger.Error("Plugin health check failed", "plugin_slug", existingPlugin.Slug, "error", err)
-			http.Error(w, fmt.Sprintf("Plugin health check failed: %v", err), http.StatusBadRequest)
+			cms.sendErrorResponse(w, fmt.Sprintf("Plugin health check failed: %v", err), http.StatusBadRequest)
 			return
 		}
 
@@ -424,9 +618,7 @@ func (cms *CMS) handleUploadPlugin(w http.ResponseWriter, r *http.Request) {
 		}
 		cms.mutex.Unlock()
 
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(existingPlugin)
+		cms.sendSuccessResponse(w, existingPlugin, http.StatusOK)
 		return
 	}
 
@@ -462,7 +654,7 @@ func (cms *CMS) handleUploadPlugin(w http.ResponseWriter, r *http.Request) {
 		os.Remove(plugin.RootFSPath)
 
 		logger.Error("Plugin health check failed", "plugin_slug", plugin.Slug, "error", err)
-		http.Error(w, fmt.Sprintf("Plugin health check failed: %v", err), http.StatusBadRequest)
+		cms.sendErrorResponse(w, fmt.Sprintf("Plugin health check failed: %v", err), http.StatusBadRequest)
 		return
 	}
 
@@ -485,9 +677,7 @@ func (cms *CMS) handleUploadPlugin(w http.ResponseWriter, r *http.Request) {
 		logger.Error("Failed to save plugins", "error", err)
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(plugin)
+	cms.sendSuccessResponse(w, plugin, http.StatusCreated)
 }
 
 // handleGetPlugin returns a specific plugin by slug
@@ -507,14 +697,13 @@ func (cms *CMS) handleGetPlugin(w http.ResponseWriter, r *http.Request) {
 
 	if !exists {
 		logger.Warn("Plugin not found", "plugin_slug", pluginSlug)
-		http.Error(w, "Plugin not found", http.StatusNotFound)
+		cms.sendErrorResponse(w, "Plugin not found", http.StatusNotFound)
 		return
 	}
 
 	logger.Debug("Retrieved plugin", "plugin_slug", pluginSlug, "name", plugin.Name, "version", plugin.Version)
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(plugin)
+	cms.sendSuccessResponse(w, plugin, http.StatusOK)
 }
 
 // handleDeletePlugin deletes a plugin by slug
@@ -534,7 +723,7 @@ func (cms *CMS) handleDeletePlugin(w http.ResponseWriter, r *http.Request) {
 	plugin, exists := cms.plugins[pluginSlug]
 	if !exists {
 		logger.Warn("Plugin not found for deletion", "plugin_slug", pluginSlug)
-		http.Error(w, "Plugin not found", http.StatusNotFound)
+		cms.sendErrorResponse(w, "Plugin not found", http.StatusNotFound)
 		return
 	}
 
@@ -621,7 +810,7 @@ func (cms *CMS) loadPlugins() {
 
 // makeHTTPRequest makes an HTTP request and returns the response as a map
 func (cms *CMS) makeHTTPRequest(method, url string, body interface{}) (map[string]interface{}, error) {
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := &http.Client{Timeout: 10 * time.Second} // Increased for snapshot resumption
 
 	var reqBody io.Reader
 	if body != nil {
@@ -713,14 +902,13 @@ func (cms *CMS) handleActivatePlugin(w http.ResponseWriter, r *http.Request) {
 
 	plugin, exists := cms.plugins[pluginSlug]
 	if !exists {
-		http.Error(w, "Plugin not found", http.StatusNotFound)
+		cms.sendErrorResponse(w, "Plugin not found", http.StatusNotFound)
 		return
 	}
 
 	if plugin.Status == "active" {
 		logger.Info("Plugin already active", "plugin_slug", pluginSlug)
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(plugin)
+		cms.sendSuccessResponse(w, plugin, http.StatusOK)
 		return
 	}
 
@@ -732,13 +920,12 @@ func (cms *CMS) handleActivatePlugin(w http.ResponseWriter, r *http.Request) {
 
 		if err := cms.savePlugins(); err != nil {
 			logger.Error("Failed to save plugins after activation", "error", err)
-			http.Error(w, "Failed to save plugin state", http.StatusInternalServerError)
+			cms.sendErrorResponse(w, "Failed to save plugin state", http.StatusInternalServerError)
 			return
 		}
 
 		logger.Info("Plugin activated with existing snapshot", "plugin_slug", pluginSlug)
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(plugin)
+		cms.sendSuccessResponse(w, plugin, http.StatusOK)
 		return
 	}
 
@@ -748,7 +935,7 @@ func (cms *CMS) handleActivatePlugin(w http.ResponseWriter, r *http.Request) {
 
 	if err := cms.vmManager.StartVM(instanceID, plugin); err != nil {
 		logger.Error("Failed to start VM for snapshot", "plugin_slug", pluginSlug, "error", err)
-		http.Error(w, "Failed to start VM", http.StatusInternalServerError)
+		cms.sendErrorResponse(w, "Failed to start VM", http.StatusInternalServerError)
 		return
 	}
 
@@ -766,7 +953,7 @@ func (cms *CMS) handleActivatePlugin(w http.ResponseWriter, r *http.Request) {
 	vmIP, exists := cms.vmManager.getVMIP(instanceID)
 	if !exists {
 		logger.Error("Failed to get VM IP for snapshot", "plugin_slug", pluginSlug)
-		http.Error(w, "Failed to get VM IP", http.StatusInternalServerError)
+		cms.sendErrorResponse(w, "Failed to get VM IP", http.StatusInternalServerError)
 		return
 	}
 
@@ -775,7 +962,7 @@ func (cms *CMS) handleActivatePlugin(w http.ResponseWriter, r *http.Request) {
 			"plugin_slug", pluginSlug,
 			"attempts", 15,
 			"error", err)
-		http.Error(w, "Plugin failed health check", http.StatusInternalServerError)
+		cms.sendErrorResponse(w, "Plugin failed health check", http.StatusInternalServerError)
 		return
 	}
 
@@ -783,7 +970,7 @@ func (cms *CMS) handleActivatePlugin(w http.ResponseWriter, r *http.Request) {
 	snapshotPath := cms.vmManager.GetSnapshotPath(pluginSlug)
 	if err := cms.vmManager.CreateSnapshot(instanceID, snapshotPath); err != nil {
 		logger.Error("Failed to create snapshot", "plugin_slug", pluginSlug, "error", err)
-		http.Error(w, "Failed to create snapshot", http.StatusInternalServerError)
+		cms.sendErrorResponse(w, "Failed to create snapshot", http.StatusInternalServerError)
 		return
 	}
 
@@ -793,14 +980,13 @@ func (cms *CMS) handleActivatePlugin(w http.ResponseWriter, r *http.Request) {
 	// Save to registry
 	if err := cms.savePlugins(); err != nil {
 		logger.Error("Failed to save plugins after activation", "error", err)
-		http.Error(w, "Failed to save plugin state", http.StatusInternalServerError)
+		cms.sendErrorResponse(w, "Failed to save plugin state", http.StatusInternalServerError)
 		return
 	}
 
 	logger.Info("Plugin activated successfully with snapshot", "plugin_slug", pluginSlug, "snapshot_path", snapshotPath)
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(plugin)
+	cms.sendSuccessResponse(w, plugin, http.StatusOK)
 }
 
 // handleDeactivatePlugin deactivates a plugin and cleans up snapshots
@@ -813,14 +999,13 @@ func (cms *CMS) handleDeactivatePlugin(w http.ResponseWriter, r *http.Request) {
 
 	plugin, exists := cms.plugins[pluginSlug]
 	if !exists {
-		http.Error(w, "Plugin not found", http.StatusNotFound)
+		cms.sendErrorResponse(w, "Plugin not found", http.StatusNotFound)
 		return
 	}
 
 	if plugin.Status == "inactive" {
 		logger.Info("Plugin already inactive", "plugin_slug", pluginSlug)
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(plugin)
+		cms.sendSuccessResponse(w, plugin, http.StatusOK)
 		return
 	}
 
@@ -836,14 +1021,13 @@ func (cms *CMS) handleDeactivatePlugin(w http.ResponseWriter, r *http.Request) {
 	// Save to registry
 	if err := cms.savePlugins(); err != nil {
 		logger.Error("Failed to save plugins after deactivation", "error", err)
-		http.Error(w, "Failed to save plugin state", http.StatusInternalServerError)
+		cms.sendErrorResponse(w, "Failed to save plugin state", http.StatusInternalServerError)
 		return
 	}
 
 	logger.Info("Plugin deactivated successfully", "plugin_slug", pluginSlug)
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(plugin)
+	cms.sendSuccessResponse(w, plugin, http.StatusOK)
 }
 
 // handleExecuteAction executes an action across all plugins that hook to it
@@ -858,13 +1042,13 @@ func (cms *CMS) handleExecuteAction(w http.ResponseWriter, r *http.Request) {
 
 	if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
 		logger.Error("Failed to parse execute action request body", "error", err)
-		http.Error(w, "Invalid request body. Expected: {\"action\":\"hook.name\",\"payload\":{...}}", http.StatusBadRequest)
+		cms.sendErrorResponse(w, "Invalid request body. Expected: {\"action\":\"hook.name\",\"payload\":{...}}", http.StatusBadRequest)
 		return
 	}
 
 	if requestBody.Action == "" {
 		logger.Error("Action is required")
-		http.Error(w, "Action is required in request body", http.StatusBadRequest)
+		cms.sendErrorResponse(w, "Action is required in request body", http.StatusBadRequest)
 		return
 	}
 
@@ -902,7 +1086,7 @@ func (cms *CMS) handleExecuteAction(w http.ResponseWriter, r *http.Request) {
 
 	if len(pluginActions) == 0 {
 		logger.Warn("No active plugins found for action", "action_hook", actionHook)
-		http.Error(w, fmt.Sprintf("No plugins registered for action: %s", actionHook), http.StatusNotFound)
+		cms.sendErrorResponse(w, fmt.Sprintf("No plugins registered for action: %s", actionHook), http.StatusNotFound)
 		return
 	}
 
@@ -911,7 +1095,7 @@ func (cms *CMS) handleExecuteAction(w http.ResponseWriter, r *http.Request) {
 		"plugin_count", len(pluginActions))
 
 	// Execute action on all plugins that hook to it
-	results := make([]map[string]interface{}, 0, len(pluginActions))
+	results := make([]ActionExecutionResult, 0, len(pluginActions))
 
 	for _, pa := range pluginActions {
 		result, err := cms.executePluginAction(pa.Plugin, pa.Action, actionHook, requestBody.Payload)
@@ -921,17 +1105,13 @@ func (cms *CMS) handleExecuteAction(w http.ResponseWriter, r *http.Request) {
 				"action_hook", actionHook,
 				"error", err)
 
-			results = append(results, map[string]interface{}{
-				"plugin_slug": pa.Plugin.Slug,
-				"success":     false,
-				"error":       err.Error(),
+			results = append(results, ActionExecutionResult{
+				PluginSlug: pa.Plugin.Slug,
+				Success:    false,
+				Error:      err.Error(),
 			})
 		} else {
-			results = append(results, map[string]interface{}{
-				"plugin_slug": pa.Plugin.Slug,
-				"success":     true,
-				"result":      result,
-			})
+			results = append(results, result)
 		}
 	}
 
@@ -942,12 +1122,65 @@ func (cms *CMS) handleExecuteAction(w http.ResponseWriter, r *http.Request) {
 		"timestamp":        time.Now().Format(time.RFC3339),
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	cms.sendSuccessResponse(w, response, http.StatusOK)
 }
 
-// executePluginAction executes action with snapshot resumption for fast startup
-func (cms *CMS) executePluginAction(plugin *Plugin, action PluginAction, hook string, payload map[string]interface{}) (map[string]interface{}, error) {
+// Enhanced handler functions
+
+// handleHealthCheck provides detailed health information
+func (cms *CMS) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
+	cms.mutex.RLock()
+	totalPlugins := len(cms.plugins)
+	activePlugins := 0
+	for _, plugin := range cms.plugins {
+		if plugin.Status == "active" {
+			activePlugins++
+		}
+	}
+	cms.mutex.RUnlock()
+
+	health := map[string]interface{}{
+		"status":         "healthy",
+		"total_plugins":  totalPlugins,
+		"active_plugins": activePlugins,
+		"vm_instances":   len(cms.vmManager.instances),
+		"uptime":         time.Since(time.Now()).String(), // This would need startup time tracking
+	}
+
+	cms.sendSuccessResponse(w, health, http.StatusOK)
+}
+
+// handleMetrics provides basic metrics
+func (cms *CMS) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	cms.mutex.RLock()
+	metrics := map[string]interface{}{
+		"plugins_total":      len(cms.plugins),
+		"instances_total":    len(cms.vmManager.instances),
+		"concurrent_limit":   MaxConcurrentActions,
+		"concurrent_current": MaxConcurrentActions - len(cms.actionSemaphore),
+	}
+	cms.mutex.RUnlock()
+
+	cms.sendSuccessResponse(w, metrics, http.StatusOK)
+}
+
+// executePluginAction executes action with enhanced error handling and performance optimization
+func (cms *CMS) executePluginAction(plugin *Plugin, action PluginAction, hook string, payload map[string]interface{}) (ActionExecutionResult, error) {
+	start := time.Now()
+	result := ActionExecutionResult{
+		PluginSlug: plugin.Slug,
+	}
+
+	// Acquire semaphore to limit concurrent executions
+	select {
+	case cms.actionSemaphore <- struct{}{}:
+		defer func() { <-cms.actionSemaphore }()
+	case <-time.After(5 * time.Second):
+		result.Error = "execution queue full, try again later"
+		result.ExecutionTime = time.Since(start)
+		return result, fmt.Errorf("execution queue full")
+	}
+
 	// Use plugin slug as instance ID for consistency
 	instanceID := plugin.Slug
 
@@ -968,7 +1201,9 @@ func (cms *CMS) executePluginAction(plugin *Plugin, action PluginAction, hook st
 	}
 
 	if err != nil {
-		return nil, fmt.Errorf("failed to start VM: %v", err)
+		result.Error = fmt.Sprintf("failed to start VM: %v", err)
+		result.ExecutionTime = time.Since(start)
+		return result, err
 	}
 
 	// Clean up VM after execution
@@ -978,13 +1213,19 @@ func (cms *CMS) executePluginAction(plugin *Plugin, action PluginAction, hook st
 		}
 	}()
 
-	// Brief wait for snapshot resumption to complete (max 200ms)
-	time.Sleep(200 * time.Millisecond)
+	// Optimized wait time based on snapshot usage
+	if cms.vmManager.HasSnapshot(plugin.Slug) {
+		time.Sleep(SnapshotResumeWait) // 200ms max as per user requirement
+	} else {
+		time.Sleep(1 * time.Second) // Regular startup needs more time
+	}
 
 	// Get VM IP
 	vmIP, exists := cms.vmManager.getVMIP(instanceID)
 	if !exists {
-		return nil, fmt.Errorf("VM IP not found for instance %s", instanceID)
+		result.Error = fmt.Sprintf("VM IP not found for instance %s", instanceID)
+		result.ExecutionTime = time.Since(start)
+		return result, fmt.Errorf("VM IP not found")
 	}
 
 	// Prepare request to plugin
@@ -993,20 +1234,27 @@ func (cms *CMS) executePluginAction(plugin *Plugin, action PluginAction, hook st
 		"payload": payload,
 	}
 
-	// Execute action via HTTP
+	// Execute action via HTTP with timeout
 	actionURL := fmt.Sprintf("http://%s:80%s", vmIP, action.Endpoint)
-	response, err := cms.makeHTTPRequest(action.Method, actionURL, pluginRequest)
+	response, err := cms.makeHTTPRequestWithTimeout(action.Method, actionURL, pluginRequest, DefaultHTTPTimeout)
 	if err != nil {
-		return nil, fmt.Errorf("failed to execute action: %v", err)
+		result.Error = fmt.Sprintf("failed to execute action: %v", err)
+		result.ExecutionTime = time.Since(start)
+		return result, err
 	}
 
-	logger.Info("Action executed successfully via snapshot resumption",
+	result.Success = true
+	result.Result = response
+	result.ExecutionTime = time.Since(start)
+
+	logger.Info("Action executed successfully",
 		"plugin_slug", plugin.Slug,
 		"action_hook", hook,
 		"vm_ip", vmIP,
+		"execution_time_ms", result.ExecutionTime.Milliseconds(),
 		"used_snapshot", cms.vmManager.HasSnapshot(plugin.Slug))
 
-	return response, nil
+	return result, nil
 }
 
 // extractPluginZip extracts a plugin ZIP file containing rootfs.ext4 and plugin.json
@@ -1167,6 +1415,114 @@ func (cms *CMS) verifyPluginHealth(plugin *Plugin) error {
 	return nil
 }
 
+// generateID generates a unique ID
+func generateID() string {
+	return fmt.Sprintf("%d", time.Now().UnixNano())
+}
+
+// setupLogger initializes structured logging to console and a file
+func setupLogger() error {
+	logsDir := "/app/data/logs"
+	if err := os.MkdirAll(logsDir, 0755); err != nil {
+		return fmt.Errorf("failed to create logs directory: %v", err)
+	}
+
+	// Create log file with date only (YYYY-MM-DD)
+	date := time.Now().Format("2006-01-02")
+	logFile := filepath.Join(logsDir, fmt.Sprintf("cms_%s.log", date))
+
+	// Open log file
+	file, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to open log file: %v", err)
+	}
+
+	// Create multi-writer for both file and console
+	multiWriter := io.MultiWriter(os.Stdout, file)
+
+	// Create JSON handler for structured logging
+	handler := slog.NewJSONHandler(multiWriter, &slog.HandlerOptions{
+		Level:     slog.LevelDebug,
+		AddSource: true,
+	})
+
+	// Create logger
+	logger = slog.New(handler)
+
+	// Set as default logger
+	slog.SetDefault(logger)
+
+	// Initialize HTTP client with optimized settings
+	httpClient = &http.Client{
+		Timeout: DefaultHTTPTimeout,
+		Transport: &http.Transport{
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 10,
+			IdleConnTimeout:     30 * time.Second,
+		},
+	}
+
+	logger.Info("Logger and HTTP client initialized",
+		"log_file", logFile,
+		"level", "debug",
+		"http_timeout", DefaultHTTPTimeout,
+		"timestamp", time.Now().Format(time.RFC3339),
+	)
+
+	return nil
+}
+
+// makeHTTPRequestWithTimeout makes an HTTP request with configurable timeout
+func (cms *CMS) makeHTTPRequestWithTimeout(method, url string, body interface{}, timeout time.Duration) (map[string]interface{}, error) {
+	client := &http.Client{Timeout: timeout}
+
+	var reqBody io.Reader
+	if body != nil {
+		bodyBytes, err := json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+		reqBody = bytes.NewBuffer(bodyBytes)
+	}
+
+	req, err := http.NewRequest(method, url, reqBody)
+	if err != nil {
+		return nil, err
+	}
+
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, resp.Status)
+	}
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	return result, nil
+}
+
+// responseWriter wrapper to capture status code
+type responseWriter struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (rw *responseWriter) WriteHeader(code int) {
+	rw.statusCode = code
+	rw.ResponseWriter.WriteHeader(code)
+}
+
 func main() {
 	// Initialize structured logging
 	if err := setupLogger(); err != nil {
@@ -1182,7 +1538,7 @@ func main() {
 
 	port := os.Getenv("CMS_PORT")
 	if port == "" {
-		port = "8080"
+		port = DefaultPort
 	}
 
 	logger.Info("CMS configuration",

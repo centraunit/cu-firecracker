@@ -1,20 +1,20 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"time"
 
-	"bytes"
-	"encoding/json"
-	"io"
-	"net/http"
-
-	"github.com/firecracker-microvm/firecracker-go-sdk"
+	firecracker "github.com/firecracker-microvm/firecracker-go-sdk"
 	"github.com/firecracker-microvm/firecracker-go-sdk/client/models"
+	"github.com/sirupsen/logrus"
 )
 
 // allocateIP allocates a unique IP address for a VM instance
@@ -64,171 +64,156 @@ func (vm *VMManager) getVMIP(instanceID string) (string, bool) {
 	return ip, exists
 }
 
-// StartVM starts a new Firecracker microVM
-func (vm *VMManager) StartVM(instanceID string, plugin *Plugin) error {
-	vm.mutex.Lock()
-	defer vm.mutex.Unlock()
+// createFirecrackerLogger creates a logrus logger compatible with Firecracker SDK
+func createFirecrackerLogger() *logrus.Entry {
+	firecrackerLog := logrus.New()
+	firecrackerLog.SetLevel(logrus.InfoLevel)
+	firecrackerLog.SetFormatter(&logrus.JSONFormatter{})
+	return firecrackerLog.WithField("component", "firecracker")
+}
 
-	logger.Info("Starting VM",
-		"instance_id", instanceID,
-		"plugin_slug", plugin.Slug,
-		"plugin_name", plugin.Name,
-		"rootfs_path", plugin.RootFSPath,
-		"kernel_path", vm.kernelPath,
-		"firecracker_path", vm.firecrackerPath,
-	)
+// setupNetworkInterface creates and configures the tap interface for the VM
+func (vm *VMManager) setupNetworkInterface(tapName string) error {
+	logger.Debug("Setting up network interface", "tap_name", tapName)
 
-	// Allocate unique IP for this VM
-	vmIP, err := vm.allocateIP(instanceID)
-	if err != nil {
-		logger.Error("Failed to allocate IP", "instance_id", instanceID, "error", err)
-		return fmt.Errorf("failed to allocate IP: %v", err)
+	// Step 1: Create bridge if it doesn't exist
+	bridgeName := "fcnetbridge0"
+	cmd := exec.Command("ip", "link", "show", bridgeName)
+	if err := cmd.Run(); err != nil {
+		logger.Debug("Creating bridge", "bridge", bridgeName)
+		cmd = exec.Command("ip", "link", "add", bridgeName, "type", "bridge")
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("failed to create bridge %s: %v", bridgeName, err)
+		}
 	}
 
-	// Create unique tap interface for VM networking
-	tapName := fmt.Sprintf("tap-%s", instanceID[len(instanceID)-8:])
-
-	// Create tap interface
-	cmd := exec.Command("ip", "tuntap", "add", tapName, "mode", "tap")
-	if err := cmd.Run(); err != nil {
-		logger.Debug("Tap interface may already exist", "instance_id", instanceID, "tap", tapName, "error", err)
+	// Step 2: Configure bridge IP if not already set
+	cmd = exec.Command("ip", "addr", "show", bridgeName)
+	output, _ := cmd.Output()
+	if !bytes.Contains(output, []byte("192.168.127.1/24")) {
+		logger.Debug("Adding IP to bridge", "bridge", bridgeName, "ip", "192.168.127.1/24")
+		cmd = exec.Command("ip", "addr", "add", "192.168.127.1/24", "dev", bridgeName)
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("failed to add IP to bridge: %v", err)
+		}
 	}
 
-	// Create bridge if it doesn't exist
-	cmd = exec.Command("ip", "link", "add", "fcnetbridge0", "type", "bridge")
+	// Step 3: Bring up bridge
+	cmd = exec.Command("ip", "link", "set", bridgeName, "up")
 	if err := cmd.Run(); err != nil {
-		logger.Debug("Bridge may already exist", "instance_id", instanceID, "error", err)
-	}
-
-	// Add IP to bridge
-	cmd = exec.Command("ip", "addr", "add", "192.168.127.1/24", "dev", "fcnetbridge0")
-	if err := cmd.Run(); err != nil {
-		logger.Debug("Bridge IP may already be set", "instance_id", instanceID, "error", err)
-	}
-
-	// Bring up bridge
-	cmd = exec.Command("ip", "link", "set", "fcnetbridge0", "up")
-	if err := cmd.Run(); err != nil {
-		logger.Error("Failed to bring up bridge", "instance_id", instanceID, "error", err)
-		vm.deallocateIP(instanceID) // Clean up IP on failure
 		return fmt.Errorf("failed to bring up bridge: %v", err)
 	}
 
-	// Add tap to bridge
-	cmd = exec.Command("ip", "link", "set", tapName, "master", "fcnetbridge0")
+	// Step 4: Delete tap interface if it already exists
+	cmd = exec.Command("ip", "link", "delete", tapName)
+	cmd.Run() // Ignore error if doesn't exist
+
+	// Step 5: Create tap interface
+	logger.Debug("Creating tap interface", "tap", tapName)
+	cmd = exec.Command("ip", "tuntap", "add", "dev", tapName, "mode", "tap")
 	if err := cmd.Run(); err != nil {
-		logger.Error("Failed to add tap to bridge", "instance_id", instanceID, "tap", tapName, "error", err)
-		vm.deallocateIP(instanceID) // Clean up IP on failure
-		return fmt.Errorf("failed to add tap to bridge: %v", err)
+		return fmt.Errorf("failed to create tap interface %s: %v", tapName, err)
 	}
 
-	// Bring up tap
+	// Step 6: Bring up tap interface
+	logger.Debug("Bringing up tap interface", "tap", tapName)
 	cmd = exec.Command("ip", "link", "set", tapName, "up")
 	if err := cmd.Run(); err != nil {
-		logger.Error("Failed to bring up tap interface", "instance_id", instanceID, "tap", tapName, "error", err)
-		vm.deallocateIP(instanceID) // Clean up IP on failure
-		return fmt.Errorf("failed to bring up tap interface: %v", err)
+		// Cleanup: delete the tap interface we just created
+		exec.Command("ip", "link", "delete", tapName).Run()
+		return fmt.Errorf("failed to bring up tap interface %s: %v", tapName, err)
 	}
 
-	logger.Debug("Network interfaces created", "instance_id", instanceID, "tap", tapName, "vm_ip", vmIP)
-
-	// Create temporary directory for VM
-	vmDir := filepath.Join("/tmp", "firecracker-"+instanceID)
-	if err := os.MkdirAll(vmDir, 0755); err != nil {
-		logger.Error("Failed to create VM directory", "instance_id", instanceID, "path", vmDir, "error", err)
-		vm.deallocateIP(instanceID) // Clean up IP on failure
-		return fmt.Errorf("failed to create VM directory: %v", err)
+	// Step 7: Add tap to bridge
+	logger.Debug("Adding tap to bridge", "tap", tapName, "bridge", bridgeName)
+	cmd = exec.Command("ip", "link", "set", tapName, "master", bridgeName)
+	if err := cmd.Run(); err != nil {
+		// Cleanup: delete the tap interface
+		exec.Command("ip", "link", "delete", tapName).Run()
+		return fmt.Errorf("failed to add tap %s to bridge %s: %v", tapName, bridgeName, err)
 	}
 
-	logger.Debug("Created VM directory", "instance_id", instanceID, "path", vmDir)
+	logger.Debug("Network interface setup completed successfully", "tap", tapName, "bridge", bridgeName)
+	return nil
+}
 
-	// Create socket path
-	socketPath := filepath.Join(vmDir, "firecracker.sock")
+// StartVM starts a new Firecracker VM
+func (vm *VMManager) StartVM(instanceID string, plugin *Plugin) error {
+	logger.Info("Starting VM", "instance_id", instanceID, "plugin_slug", plugin.Slug)
 
-	// Check if rootfs file exists and is accessible
-	if _, err := os.Stat(plugin.RootFSPath); err != nil {
-		logger.Error("Rootfs file not accessible", "instance_id", instanceID, "path", plugin.RootFSPath, "error", err)
-		vm.deallocateIP(instanceID) // Clean up IP on failure
-		return fmt.Errorf("rootfs file not accessible: %v", err)
+	// Allocate IP for this instance
+	vmIP, err := vm.allocateIP(instanceID)
+	if err != nil {
+		return fmt.Errorf("failed to allocate IP for instance %s: %v", instanceID, err)
 	}
 
-	logger.Debug("Rootfs file verified", "instance_id", instanceID, "path", plugin.RootFSPath)
+	// Create network interface
+	tapName := fmt.Sprintf("fc-tap-%s", instanceID)
 
-	// Build dynamic kernel args with allocated IP
-	kernelArgs := fmt.Sprintf("console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw ip=%s::192.168.127.1:255.255.255.0:::off:1.1.1.1:1.0.0.1:", vmIP)
+	// Convert to structured logger compatible with Firecracker SDK
+	firecrackerLogger := createFirecrackerLogger()
 
-	logger.Debug("Configuring Firecracker",
-		"instance_id", instanceID,
-		"socket_path", socketPath,
-		"kernel_args", kernelArgs,
-		"vm_ip", vmIP,
-	)
-
-	// Configure Firecracker with logging only to our custom writer (no log files)
-	cfg := firecracker.Config{
-		SocketPath:      socketPath,
+	// Create machine configuration
+	cfg := &firecracker.Config{
+		SocketPath:      fmt.Sprintf("/tmp/firecracker-%s.sock", instanceID),
 		KernelImagePath: vm.kernelPath,
-		KernelArgs:      kernelArgs,
-		LogLevel:        "Info", // Reduced log level to minimize noise
-		// LogPath:      "", // Disabled - use only our custom writer
-		// LogFifo:      "", // Disabled - use only our custom writer
-		FifoLogWriter: &FirecrackerLogWriter{instanceID: instanceID},
-		Drives: []models.Drive{
-			{
-				DriveID:      firecracker.String("rootfs"),
-				PathOnHost:   firecracker.String(plugin.RootFSPath),
-				IsReadOnly:   firecracker.Bool(false),
-				IsRootDevice: firecracker.Bool(true),
-			},
-		},
+		KernelArgs:      fmt.Sprintf("ro console=ttyS0 noapic reboot=k panic=1 pci=off nomodules random.trust_cpu=on ip=%s::192.168.127.1:255.255.255.0::eth0:off", vmIP),
+		Drives: []models.Drive{{
+			DriveID:      firecracker.String("rootfs"),
+			IsRootDevice: firecracker.Bool(true),
+			IsReadOnly:   firecracker.Bool(false),
+			PathOnHost:   firecracker.String(plugin.RootFSPath),
+		}},
 		MachineCfg: models.MachineConfiguration{
 			VcpuCount:  firecracker.Int64(1),
-			MemSizeMib: firecracker.Int64(128),
+			MemSizeMib: firecracker.Int64(512),
 		},
-		// Use simple tap interface (IP configured via boot args)
-		NetworkInterfaces: []firecracker.NetworkInterface{
-			{
-				StaticConfiguration: &firecracker.StaticNetworkConfiguration{
-					HostDevName: tapName,
-				},
+		NetworkInterfaces: []firecracker.NetworkInterface{{
+			StaticConfiguration: &firecracker.StaticNetworkConfiguration{
+				MacAddress:  fmt.Sprintf("02:FC:00:00:%02x:%02x", (vm.nextIP>>8)&0xff, vm.nextIP&0xff),
+				HostDevName: tapName,
 			},
-		},
+		}},
 	}
 
-	logger.Debug("Creating Firecracker machine", "instance_id", instanceID)
+	// Setup network interface
+	if err := vm.setupNetworkInterface(tapName); err != nil {
+		return fmt.Errorf("failed to setup network interface: %v", err)
+	}
 
-	// Create Firecracker machine
-	machine, err := firecracker.NewMachine(context.Background(), cfg)
+	// Remove any existing socket
+	os.Remove(cfg.SocketPath)
+
+	// Create VM command
+	cmd := firecracker.VMCommandBuilder{}.
+		WithBin(vm.firecrackerPath).
+		WithSocketPath(cfg.SocketPath).
+		WithStdout(os.Stdout).
+		WithStderr(os.Stderr).
+		Build(context.Background())
+
+	// Create machine with logger
+	machineOpts := []firecracker.Opt{
+		firecracker.WithProcessRunner(cmd),
+		firecracker.WithLogger(firecrackerLogger),
+	}
+
+	machine, err := firecracker.NewMachine(context.Background(), *cfg, machineOpts...)
 	if err != nil {
-		logger.Error("Failed to create Firecracker machine", "instance_id", instanceID, "error", err)
-		vm.deallocateIP(instanceID) // Clean up IP on failure
 		return fmt.Errorf("failed to create machine: %v", err)
 	}
 
-	logger.Debug("Starting Firecracker machine", "instance_id", instanceID)
-
-	// Start the machine without timeout (let it run indefinitely)
+	// Start the machine
 	if err := machine.Start(context.Background()); err != nil {
-		logger.Error("Failed to start Firecracker machine", "instance_id", instanceID, "error", err)
-		vm.deallocateIP(instanceID) // Clean up IP on failure
 		return fmt.Errorf("failed to start machine: %v", err)
 	}
 
-	logger.Debug("Firecracker machine started successfully", "instance_id", instanceID)
-
 	// Store the machine instance
+	vm.mutex.Lock()
 	vm.instances[instanceID] = machine
+	vm.mutex.Unlock()
 
-	logger.Info("VM started successfully",
-		"instance_id", instanceID,
-		"plugin_slug", plugin.Slug,
-		"plugin_name", plugin.Name,
-		"vcpu_count", 1,
-		"memory_mib", 128,
-		"vm_ip", vmIP,
-		"tap_interface", tapName,
-	)
-
+	logger.Info("VM started successfully", "instance_id", instanceID, "ip", vmIP)
 	return nil
 }
 
@@ -286,6 +271,33 @@ func (vm *VMManager) StopVM(instanceID string) error {
 	return nil
 }
 
+// StopAllVMs stops all running VM instances
+func (vm *VMManager) StopAllVMs() {
+	vm.mutex.Lock()
+	defer vm.mutex.Unlock()
+
+	logger.Info("Stopping all running VMs", "count", len(vm.instances))
+
+	for instanceID, machine := range vm.instances {
+		logger.Debug("Stopping VM", "instance_id", instanceID)
+
+		// Attempt graceful shutdown first
+		if err := machine.Shutdown(context.Background()); err != nil {
+			logger.Warn("Graceful shutdown failed, forcing stop", "instance_id", instanceID, "error", err)
+			// Force stop if graceful shutdown fails
+			machine.StopVMM()
+		}
+
+		// Clean up IP allocation
+		vm.deallocateIP(instanceID)
+	}
+
+	// Clear all instances
+	vm.instances = make(map[string]*firecracker.Machine)
+
+	logger.Info("All VMs stopped successfully")
+}
+
 // GetVMStatus returns the status of a VM instance
 func (vm *VMManager) GetVMStatus(instanceID string) (string, error) {
 	vm.mutex.RLock()
@@ -329,103 +341,92 @@ func (vm *VMManager) GetVMIP(instanceID string) (string, error) {
 	return "192.168.127.2", nil
 }
 
-// ResumeFromSnapshot starts a new VM instance from an existing snapshot
+// ResumeFromSnapshot resumes a VM from a previously created snapshot
 func (vm *VMManager) ResumeFromSnapshot(instanceID string, plugin *Plugin) error {
-	snapshotPath := vm.GetSnapshotPath(plugin.Slug)
-	memPath := snapshotPath + ".mem"
+	logger.Info("Resuming VM from snapshot", "instance_id", instanceID, "plugin_slug", plugin.Slug)
+
+	snapshotPath := vm.GetSnapshotPath(plugin.Slug) + ".snapshot"
+	memPath := vm.GetSnapshotPath(plugin.Slug) + ".mem"
 
 	// Check if snapshot files exist
 	if !vm.HasSnapshot(plugin.Slug) {
-		return fmt.Errorf("snapshot not found for plugin %s", plugin.Slug)
+		return fmt.Errorf("snapshot files not found for plugin %s", plugin.Slug)
 	}
 
-	vm.mutex.Lock()
-	defer vm.mutex.Unlock()
-
-	logger.Info("Resuming VM from snapshot", "instance_id", instanceID, "plugin_slug", plugin.Slug, "snapshot_path", snapshotPath)
-
-	// Allocate IP for the resumed VM
+	// Allocate the SAME IP that was used when creating the snapshot
 	vmIP, err := vm.allocateIP(instanceID)
 	if err != nil {
-		return fmt.Errorf("failed to allocate IP: %v", err)
+		return fmt.Errorf("failed to allocate IP for instance %s: %v", instanceID, err)
 	}
 
-	// Setup networking (same as StartVM)
-	tapName := fmt.Sprintf("tap-%s", instanceID[len(instanceID)-8:])
+	// Use the SAME tap device name format
+	tapName := fmt.Sprintf("fc-tap-%s", instanceID)
 
-	// Create tap interface
-	cmd := exec.Command("ip", "tuntap", "add", "dev", tapName, "mode", "tap")
-	if err := cmd.Run(); err != nil {
-		logger.Error("Failed to create tap interface", "instance_id", instanceID, "tap", tapName, "error", err)
-		vm.deallocateIP(instanceID)
-		return fmt.Errorf("failed to create tap interface: %v", err)
-	}
+	// Convert to structured logger compatible with Firecracker SDK
+	firecrackerLogger := createFirecrackerLogger()
 
-	// Create temporary directory for VM
-	vmDir := filepath.Join("/tmp", "firecracker-"+instanceID)
-	if err := os.MkdirAll(vmDir, 0755); err != nil {
-		vm.deallocateIP(instanceID)
-		return fmt.Errorf("failed to create VM directory: %v", err)
-	}
-	socketPath := filepath.Join(vmDir, "firecracker.sock")
-
-	// Build kernel args with allocated IP (same as regular VM)
-	kernelArgs := fmt.Sprintf("console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw ip=%s::192.168.127.1:255.255.255.0:::off:1.1.1.1:1.0.0.1:", vmIP)
-
-	// Create Firecracker config with snapshot resumption
-	cfg := firecracker.Config{
-		SocketPath:      socketPath,
+	// Create machine configuration with snapshot
+	cfg := &firecracker.Config{
+		SocketPath:      fmt.Sprintf("/tmp/firecracker-%s.sock", instanceID),
 		KernelImagePath: vm.kernelPath,
-		KernelArgs:      kernelArgs,
-		LogLevel:        "Info",
-		FifoLogWriter:   &FirecrackerLogWriter{instanceID: instanceID},
-		Drives: []models.Drive{
-			{
-				DriveID:      firecracker.String("rootfs"),
-				PathOnHost:   firecracker.String(plugin.RootFSPath),
-				IsReadOnly:   firecracker.Bool(false),
-				IsRootDevice: firecracker.Bool(true),
-			},
-		},
+		KernelArgs:      fmt.Sprintf("ro console=ttyS0 noapic reboot=k panic=1 pci=off nomodules random.trust_cpu=on ip=%s::192.168.127.1:255.255.255.0::eth0:off", vmIP),
+		Drives: []models.Drive{{
+			DriveID:      firecracker.String("rootfs"),
+			IsRootDevice: firecracker.Bool(true),
+			IsReadOnly:   firecracker.Bool(false),
+			PathOnHost:   firecracker.String(plugin.RootFSPath),
+		}},
 		MachineCfg: models.MachineConfiguration{
 			VcpuCount:  firecracker.Int64(1),
-			MemSizeMib: firecracker.Int64(128),
+			MemSizeMib: firecracker.Int64(512),
 		},
-		NetworkInterfaces: []firecracker.NetworkInterface{
-			{
-				StaticConfiguration: &firecracker.StaticNetworkConfiguration{
-					HostDevName: tapName,
-				},
+		NetworkInterfaces: []firecracker.NetworkInterface{{
+			StaticConfiguration: &firecracker.StaticNetworkConfiguration{
+				MacAddress:  fmt.Sprintf("02:FC:00:00:%02x:%02x", (vm.nextIP>>8)&0xff, vm.nextIP&0xff),
+				HostDevName: tapName,
 			},
-		},
+		}},
 	}
 
-	// Create machine with snapshot resumption option
-	machine, err := firecracker.NewMachine(
-		context.Background(),
-		cfg,
-		firecracker.WithSnapshot(memPath, snapshotPath),
-	)
+	// Setup network interface (reuse the same one)
+	if err := vm.setupNetworkInterface(tapName); err != nil {
+		return fmt.Errorf("failed to setup network interface: %v", err)
+	}
 
+	// Remove any existing socket
+	os.Remove(cfg.SocketPath)
+
+	// Create VM command
+	cmd := firecracker.VMCommandBuilder{}.
+		WithBin(vm.firecrackerPath).
+		WithSocketPath(cfg.SocketPath).
+		WithStdout(os.Stdout).
+		WithStderr(os.Stderr).
+		Build(context.Background())
+
+	// Create machine with snapshot configuration and logger
+	machineOpts := []firecracker.Opt{
+		firecracker.WithProcessRunner(cmd),
+		firecracker.WithLogger(firecrackerLogger),
+		firecracker.WithSnapshot(memPath, snapshotPath),
+	}
+
+	machine, err := firecracker.NewMachine(context.Background(), *cfg, machineOpts...)
 	if err != nil {
-		vm.deallocateIP(instanceID)
 		return fmt.Errorf("failed to create machine from snapshot: %v", err)
 	}
 
-	// Start the machine (resume from snapshot - should be ~100-200ms)
+	// Start the machine (this will resume from snapshot)
 	if err := machine.Start(context.Background()); err != nil {
-		vm.deallocateIP(instanceID)
 		return fmt.Errorf("failed to start machine from snapshot: %v", err)
 	}
 
 	// Store the machine instance
+	vm.mutex.Lock()
 	vm.instances[instanceID] = machine
+	vm.mutex.Unlock()
 
-	logger.Info("VM resumed from snapshot successfully",
-		"instance_id", instanceID,
-		"vm_ip", vmIP,
-		"plugin_slug", plugin.Slug)
-
+	logger.Info("VM resumed from snapshot successfully", "instance_id", instanceID, "ip", vmIP)
 	return nil
 }
 
@@ -504,7 +505,7 @@ func (vm *VMManager) ExecuteInVM(instanceID string, request map[string]interface
 	return response, nil
 }
 
-// CreateSnapshot creates a snapshot of a running VM for fast resumption
+// CreateSnapshot creates a snapshot of the running VM
 func (vm *VMManager) CreateSnapshot(instanceID string, snapshotPath string) error {
 	vm.mutex.RLock()
 	machine, exists := vm.instances[instanceID]
@@ -514,39 +515,34 @@ func (vm *VMManager) CreateSnapshot(instanceID string, snapshotPath string) erro
 		return fmt.Errorf("VM instance %s not found", instanceID)
 	}
 
-	logger.Info("Creating snapshot", "instance_id", instanceID, "snapshot_path", snapshotPath)
-
 	// Ensure snapshot directory exists
-	if err := os.MkdirAll(filepath.Dir(snapshotPath), 0755); err != nil {
+	if err := vm.initSnapshotDir(); err != nil {
 		return fmt.Errorf("failed to create snapshot directory: %v", err)
 	}
 
-	// Step 1: Pause the VM (required for snapshotting)
-	logger.Debug("Pausing VM for snapshot creation", "instance_id", instanceID)
-	if err := machine.PauseVM(context.Background()); err != nil {
-		return fmt.Errorf("failed to pause VM for snapshot: %v", err)
-	}
-
-	// Step 2: Create the snapshot using Machine.CreateSnapshot API
 	memFilePath := snapshotPath + ".mem"
-	err := machine.CreateSnapshot(context.Background(), memFilePath, snapshotPath)
+	snapshotFilePath := snapshotPath + ".snapshot"
 
-	// Step 3: Resume the VM regardless of snapshot success/failure
-	logger.Debug("Resuming VM after snapshot attempt", "instance_id", instanceID)
-	if resumeErr := machine.ResumeVM(context.Background()); resumeErr != nil {
-		logger.Error("Failed to resume VM after snapshot", "instance_id", instanceID, "error", resumeErr)
-		// If snapshot succeeded but resume failed, that's still an error
-		if err == nil {
-			err = fmt.Errorf("snapshot created but failed to resume VM: %v", resumeErr)
-		}
+	logger.Info("Creating snapshot", "instance_id", instanceID, "snapshot_path", snapshotFilePath, "mem_path", memFilePath)
+
+	// Pause VM before creating snapshot
+	if err := machine.PauseVM(context.Background()); err != nil {
+		return fmt.Errorf("failed to pause VM: %v", err)
 	}
 
-	// Return snapshot creation error if any
-	if err != nil {
+	// Ensure we resume the VM regardless of snapshot success/failure
+	defer func() {
+		if err := machine.ResumeVM(context.Background()); err != nil {
+			logger.Error("Failed to resume VM after snapshot", "instance_id", instanceID, "error", err)
+		}
+	}()
+
+	// Create snapshot with logger
+	if err := machine.CreateSnapshot(context.Background(), memFilePath, snapshotFilePath); err != nil {
 		return fmt.Errorf("failed to create snapshot: %v", err)
 	}
 
-	logger.Info("Snapshot created successfully", "instance_id", instanceID, "snapshot_path", snapshotPath)
+	logger.Info("Snapshot created successfully", "instance_id", instanceID, "snapshot_path", snapshotFilePath)
 	return nil
 }
 
