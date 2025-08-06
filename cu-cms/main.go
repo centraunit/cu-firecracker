@@ -10,9 +10,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
+	"archive/zip"
 	"os/exec"
 
 	"github.com/firecracker-microvm/firecracker-go-sdk"
@@ -260,16 +262,23 @@ func (cms *CMS) handleUploadPlugin(w http.ResponseWriter, r *http.Request) {
 		"form_fields", len(r.MultipartForm.Value),
 	)
 
-	// Get uploaded rootfs file
-	file, header, err := r.FormFile("rootfs")
+	// Get uploaded ZIP file (containing rootfs.ext4 + plugin.json)
+	file, header, err := r.FormFile("plugin")
 	if err != nil {
 		logger.Error("Failed to get uploaded file", "error", err)
-		http.Error(w, "Failed to get uploaded file", http.StatusBadRequest)
+		http.Error(w, "Failed to get uploaded plugin ZIP file", http.StatusBadRequest)
 		return
 	}
 	defer file.Close()
 
-	logger.Debug("Received plugin file",
+	// Verify it's a ZIP file
+	if !strings.HasSuffix(strings.ToLower(header.Filename), ".zip") {
+		logger.Error("Invalid file type", "filename", header.Filename)
+		http.Error(w, "Plugin must be a ZIP file containing rootfs.ext4 and plugin.json", http.StatusBadRequest)
+		return
+	}
+
+	logger.Debug("Received plugin ZIP file",
 		"filename", header.Filename,
 		"size", header.Size,
 		"content_type", header.Header.Get("Content-Type"),
@@ -283,34 +292,67 @@ func (cms *CMS) handleUploadPlugin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Save the rootfs file
+	// Save the ZIP file temporarily for extraction
 	pluginID := generateID()
-	rootfsPath := filepath.Join(pluginsDir, pluginID+".ext4")
-
-	logger.Debug("Saving plugin file", "plugin_id", pluginID, "path", rootfsPath)
-
-	dst, err := os.Create(rootfsPath)
-	if err != nil {
-		logger.Error("Failed to create rootfs file", "plugin_id", pluginID, "path", rootfsPath, "error", err)
-		http.Error(w, "Failed to create rootfs file", http.StatusInternalServerError)
+	tempDir := filepath.Join(pluginsDir, "temp", pluginID)
+	if err := os.MkdirAll(tempDir, 0755); err != nil {
+		logger.Error("Failed to create temp directory", "path", tempDir, "error", err)
+		http.Error(w, "Failed to create temp directory", http.StatusInternalServerError)
 		return
 	}
-	defer dst.Close()
+	defer os.RemoveAll(tempDir) // Clean up temp directory
+
+	zipPath := filepath.Join(tempDir, "plugin.zip")
+	dst, err := os.Create(zipPath)
+	if err != nil {
+		logger.Error("Failed to create ZIP file", "path", zipPath, "error", err)
+		http.Error(w, "Failed to save ZIP file", http.StatusInternalServerError)
+		return
+	}
 
 	if _, err := io.Copy(dst, file); err != nil {
-		logger.Error("Failed to save rootfs file", "plugin_id", pluginID, "error", err)
-		http.Error(w, "Failed to save rootfs file", http.StatusInternalServerError)
+		dst.Close()
+		logger.Error("Failed to save ZIP file", "error", err)
+		http.Error(w, "Failed to save ZIP file", http.StatusInternalServerError)
+		return
+	}
+	dst.Close()
+
+	logger.Debug("ZIP file saved", "path", zipPath)
+
+	// Extract ZIP file
+	if err := cms.extractPluginZip(zipPath, tempDir); err != nil {
+		logger.Error("Failed to extract ZIP", "error", err)
+		http.Error(w, fmt.Sprintf("Failed to extract plugin ZIP: %v", err), http.StatusBadRequest)
 		return
 	}
 
-	// Discover plugin metadata by starting a temporary VM and querying it
-	metadata, err := cms.discoverPluginMetadata(pluginID, rootfsPath)
+	// Parse plugin.json
+	pluginJsonPath := filepath.Join(tempDir, "plugin.json")
+	metadata, err := cms.parsePluginJson(pluginJsonPath)
 	if err != nil {
-		logger.Error("Failed to discover plugin metadata", "plugin_id", pluginID, "error", err)
-		os.Remove(rootfsPath) // Clean up on failure
-		http.Error(w, fmt.Sprintf("Failed to discover plugin metadata: %v", err), http.StatusBadRequest)
+		logger.Error("Failed to parse plugin.json", "error", err)
+		http.Error(w, fmt.Sprintf("Invalid plugin.json: %v", err), http.StatusBadRequest)
 		return
 	}
+
+	// Verify rootfs.ext4 exists
+	rootfsTempPath := filepath.Join(tempDir, "rootfs.ext4")
+	if _, err := os.Stat(rootfsTempPath); os.IsNotExist(err) {
+		logger.Error("rootfs.ext4 not found in ZIP")
+		http.Error(w, "rootfs.ext4 not found in plugin ZIP", http.StatusBadRequest)
+		return
+	}
+
+	// Move rootfs to final location
+	rootfsPath := filepath.Join(pluginsDir, pluginID+".ext4")
+	if err := os.Rename(rootfsTempPath, rootfsPath); err != nil {
+		logger.Error("Failed to move rootfs", "error", err)
+		http.Error(w, "Failed to install plugin rootfs", http.StatusInternalServerError)
+		return
+	}
+
+	logger.Debug("Plugin extracted successfully", "plugin_id", pluginID, "rootfs_path", rootfsPath)
 
 	// Use form data as fallback if not provided in plugin metadata
 	if metadata.Name == "" {
@@ -725,81 +767,71 @@ func (cms *CMS) handleExecutePlugin(w http.ResponseWriter, r *http.Request) {
 	}()
 }
 
-// discoverPluginMetadata starts a temporary VM to discover plugin metadata
-func (cms *CMS) discoverPluginMetadata(pluginID, rootfsPath string) (*Plugin, error) {
-	logger.Debug("Discovering plugin metadata", "plugin_id", pluginID)
+// OLD DISCOVERY FUNCTIONS REMOVED - we now use plugin.json from ZIP files
 
-	// Create temporary plugin for discovery
-	tempPlugin := &Plugin{
-		ID:         pluginID,
-		RootFSPath: rootfsPath,
-		KernelPath: cms.vmManager.kernelPath,
+// savePlugins saves plugins to persistent storage
+func (cms *CMS) savePlugins() error {
+	cms.mutex.RLock()
+	defer cms.mutex.RUnlock()
+
+	pluginsDir := "/app/data/plugins"
+	if err := os.MkdirAll(pluginsDir, 0755); err != nil {
+		logger.Error("Failed to create plugins directory", "path", pluginsDir, "error", err)
+		return err
 	}
 
-	// Start temporary VM
-	err := cms.vmManager.StartVM(pluginID, tempPlugin)
+	pluginsFile := filepath.Join(pluginsDir, "plugins.json")
+	data, err := json.MarshalIndent(cms.plugins, "", "  ")
 	if err != nil {
-		return nil, fmt.Errorf("failed to start discovery VM: %v", err)
+		logger.Error("Failed to marshal plugins to JSON", "error", err)
+		return err
 	}
 
-	// Clean up VM after discovery
-	defer func() {
-		if stopErr := cms.vmManager.StopVM(pluginID); stopErr != nil {
-			logger.Error("Failed to stop discovery VM", "plugin_id", pluginID, "error", stopErr)
-		}
-	}()
-
-	// Wait for plugin to start (no sleep - use health check)
-	metadata, err := cms.queryPluginMetadata(pluginID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query plugin metadata: %v", err)
+	if err := os.WriteFile(pluginsFile, data, 0644); err != nil {
+		logger.Error("Failed to write plugins file", "path", pluginsFile, "error", err)
+		return err
 	}
 
-	return metadata, nil
+	logger.Info("Plugins saved to registry",
+		"file", pluginsFile,
+		"plugin_count", len(cms.plugins),
+		"file_size", len(data),
+	)
+
+	return nil
 }
 
-// queryPluginMetadata queries the plugin for its metadata via HTTP
-func (cms *CMS) queryPluginMetadata(instanceID string) (*Plugin, error) {
-	// Get VM IP
-	vmIP, exists := cms.vmManager.getVMIP(instanceID)
-	if !exists {
-		return nil, fmt.Errorf("VM IP not found for instance %s", instanceID)
+// loadPlugins loads plugins from persistent storage
+func (cms *CMS) loadPlugins() {
+	pluginsFile := "/app/data/plugins/plugins.json"
+
+	logger.Debug("Loading plugins from registry", "file", pluginsFile)
+
+	data, err := os.ReadFile(pluginsFile)
+	if err != nil {
+		logger.Info("No existing plugins registry found", "file", pluginsFile)
+		return
 	}
 
-	// Try to get health status and actions with retries
-	maxRetries := 10
-	retryDelay := 500 * time.Millisecond
-
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		logger.Debug("Attempting to discover plugin metadata",
-			"instance_id", instanceID,
-			"attempt", attempt,
-			"vm_ip", vmIP)
-
-		// Try health endpoint first
-		healthURL := fmt.Sprintf("http://%s:80/health", vmIP)
-		health, healthErr := cms.makeHTTPRequest("GET", healthURL, nil)
-
-		// Try actions discovery endpoint
-		actionsURL := fmt.Sprintf("http://%s:80/actions", vmIP)
-		actions, actionsErr := cms.makeHTTPRequest("GET", actionsURL, nil)
-
-		if healthErr == nil && actionsErr == nil {
-			// Parse the responses to build plugin metadata
-			return cms.parsePluginMetadata(health, actions)
-		}
-
-		if attempt < maxRetries {
-			time.Sleep(retryDelay)
-		}
+	var plugins map[string]*Plugin
+	if err := json.Unmarshal(data, &plugins); err != nil {
+		logger.Error("Failed to parse plugins registry", "file", pluginsFile, "error", err)
+		return
 	}
 
-	return nil, fmt.Errorf("failed to discover plugin metadata after %d attempts", maxRetries)
+	cms.mutex.Lock()
+	defer cms.mutex.Unlock()
+	cms.plugins = plugins
+
+	logger.Info("Loaded plugins from registry",
+		"file", pluginsFile,
+		"count", len(plugins),
+	)
 }
 
 // makeHTTPRequest makes an HTTP request and returns the response as a map
 func (cms *CMS) makeHTTPRequest(method, url string, body interface{}) (map[string]interface{}, error) {
-	client := &http.Client{Timeout: 3 * time.Second}
+	client := &http.Client{Timeout: 5 * time.Second}
 
 	var reqBody io.Reader
 	if body != nil {
@@ -837,150 +869,7 @@ func (cms *CMS) makeHTTPRequest(method, url string, body interface{}) (map[strin
 	return result, nil
 }
 
-// parsePluginMetadata parses health and actions responses to build plugin metadata
-func (cms *CMS) parsePluginMetadata(health, actions map[string]interface{}) (*Plugin, error) {
-	plugin := &Plugin{
-		Health: PluginHealth{
-			Status:    "unknown",
-			LastCheck: time.Now(),
-		},
-		Actions: make(map[string]PluginAction),
-	}
-
-	// Parse health response
-	if healthStatus, ok := health["status"].(string); ok {
-		plugin.Health.Status = healthStatus
-	}
-
-	// Parse actions response
-	if pluginSlug, ok := actions["plugin_slug"].(string); ok {
-		plugin.Slug = pluginSlug
-	}
-
-	if actionsData, ok := actions["actions"].(map[string]interface{}); ok {
-		for actionName, actionInfo := range actionsData {
-			if actionMap, ok := actionInfo.(map[string]interface{}); ok {
-				action := PluginAction{
-					Name: actionName,
-				}
-
-				if name, ok := actionMap["name"].(string); ok {
-					action.Name = name
-				}
-				if desc, ok := actionMap["description"].(string); ok {
-					action.Description = desc
-				}
-				if method, ok := actionMap["method"].(string); ok {
-					action.Method = method
-				}
-				if endpoint, ok := actionMap["endpoint"].(string); ok {
-					action.Endpoint = endpoint
-				}
-				if priority, ok := actionMap["priority"].(float64); ok {
-					action.Priority = int(priority)
-				}
-
-				// Parse hooks array
-				if hooksData, ok := actionMap["hooks"].([]interface{}); ok {
-					hooks := make([]string, len(hooksData))
-					for i, hook := range hooksData {
-						if hookStr, ok := hook.(string); ok {
-							hooks[i] = hookStr
-						}
-					}
-					action.Hooks = hooks
-				}
-
-				plugin.Actions[actionName] = action
-			}
-		}
-	}
-
-	// Set default values if not discovered
-	if plugin.Slug == "" {
-		plugin.Slug = "unknown-plugin"
-	}
-	if plugin.Name == "" {
-		plugin.Name = "Unknown Plugin"
-	}
-
-	return plugin, nil
-}
-
-// savePlugins saves plugins to disk
-func (cms *CMS) savePlugins() error {
-	cms.mutex.RLock()
-	defer cms.mutex.RUnlock()
-
-	pluginsDir := "/app/data/plugins"
-	if err := os.MkdirAll(pluginsDir, 0755); err != nil {
-		logger.Error("Failed to create plugins directory", "path", pluginsDir, "error", err)
-		return err
-	}
-
-	pluginsFile := filepath.Join(pluginsDir, "plugins.json")
-	data, err := json.MarshalIndent(cms.plugins, "", "  ")
-	if err != nil {
-		logger.Error("Failed to marshal plugins to JSON", "error", err)
-		return err
-	}
-
-	if err := os.WriteFile(pluginsFile, data, 0644); err != nil {
-		logger.Error("Failed to write plugins file", "path", pluginsFile, "error", err)
-		return err
-	}
-
-	logger.Info("Plugins saved to disk",
-		"file", pluginsFile,
-		"plugin_count", len(cms.plugins),
-		"file_size", len(data),
-	)
-
-	return nil
-}
-
-// loadPlugins loads plugins from disk
-func (cms *CMS) loadPlugins() {
-	pluginsFile := "/app/data/plugins/plugins.json"
-
-	logger.Debug("Loading plugins from disk", "file", pluginsFile)
-
-	data, err := os.ReadFile(pluginsFile)
-	if err != nil {
-		logger.Info("No existing plugins found", "file", pluginsFile, "error", err)
-		return
-	}
-
-	var plugins map[string]*Plugin
-	if err := json.Unmarshal(data, &plugins); err != nil {
-		logger.Error("Failed to parse plugins file", "file", pluginsFile, "error", err)
-		return
-	}
-
-	cms.mutex.Lock()
-	defer cms.mutex.Unlock()
-	cms.plugins = plugins
-
-	logger.Info("Loaded plugins from disk",
-		"file", pluginsFile,
-		"count", len(plugins),
-		"file_size", len(data),
-	)
-
-	// Log details of each loaded plugin
-	for id, plugin := range plugins {
-		logger.Debug("Loaded plugin",
-			"plugin_id", id,
-			"name", plugin.Name,
-			"description", plugin.Description,
-			"status", plugin.Status,
-			"created_at", plugin.CreatedAt,
-			"rootfs_path", plugin.RootFSPath,
-		)
-	}
-}
-
-// handleActivatePlugin activates a plugin and creates a snapshot
+// handleActivatePlugin activates a plugin
 func (cms *CMS) handleActivatePlugin(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	pluginSlug := vars["slug"]
@@ -1004,19 +893,13 @@ func (cms *CMS) handleActivatePlugin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Start VM and create snapshot for performance
-	instanceID := generateID()
-	if err := cms.vmManager.StartVM(instanceID, plugin); err != nil {
-		logger.Error("Failed to start VM for activation", "plugin_slug", pluginSlug, "error", err)
-		http.Error(w, "Failed to activate plugin", http.StatusInternalServerError)
-		return
-	}
-
-	// TODO: Create Firecracker snapshot here for performance
-	// This will allow instant plugin execution later
-
 	plugin.Status = "active"
 	plugin.UpdatedAt = time.Now()
+
+	// Save to registry
+	if err := cms.savePlugins(); err != nil {
+		logger.Error("Failed to save plugins after activation", "error", err)
+	}
 
 	logger.Info("Plugin activated successfully", "plugin_slug", pluginSlug)
 
@@ -1044,13 +927,18 @@ func (cms *CMS) handleDeactivatePlugin(w http.ResponseWriter, r *http.Request) {
 	plugin.Status = "inactive"
 	plugin.UpdatedAt = time.Now()
 
+	// Save to registry
+	if err := cms.savePlugins(); err != nil {
+		logger.Error("Failed to save plugins after deactivation", "error", err)
+	}
+
 	logger.Info("Plugin deactivated successfully", "plugin_slug", pluginSlug)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(plugin)
 }
 
-// handleListActions lists all available actions across all plugins
+// handleListActions lists all available actions from plugin registry
 func (cms *CMS) handleListActions(w http.ResponseWriter, r *http.Request) {
 	logger.Debug("Handling list actions request")
 
@@ -1059,7 +947,7 @@ func (cms *CMS) handleListActions(w http.ResponseWriter, r *http.Request) {
 
 	actionMap := make(map[string][]map[string]interface{})
 
-	// Collect all actions from all active plugins
+	// Collect all actions from all active plugins (from registry)
 	for _, plugin := range cms.plugins {
 		if plugin.Status != "active" {
 			continue
@@ -1110,7 +998,7 @@ func (cms *CMS) handleExecuteAction(w http.ResponseWriter, r *http.Request) {
 
 	cms.mutex.RLock()
 
-	// Find all plugins that hook to this action
+	// Find all plugins that hook to this action (from registry)
 	var pluginActions []struct {
 		Plugin *Plugin
 		Action PluginAction
@@ -1147,7 +1035,7 @@ func (cms *CMS) handleExecuteAction(w http.ResponseWriter, r *http.Request) {
 		"action_hook", actionHook,
 		"plugin_count", len(pluginActions))
 
-	// Execute action on all plugins simultaneously (TODO: add priority ordering)
+	// Execute action on all plugins
 	results := make([]map[string]interface{}, 0, len(pluginActions))
 
 	for _, pa := range pluginActions {
@@ -1220,6 +1108,108 @@ func (cms *CMS) executePluginAction(plugin *Plugin, action PluginAction, hook st
 	}
 
 	return result, nil
+}
+
+// extractPluginZip extracts a plugin ZIP file containing rootfs.ext4 and plugin.json
+func (cms *CMS) extractPluginZip(zipPath, destDir string) error {
+	reader, err := zip.OpenReader(zipPath)
+	if err != nil {
+		return fmt.Errorf("failed to open ZIP file: %v", err)
+	}
+	defer reader.Close()
+
+	// Track required files
+	hasRootfs := false
+	hasPluginJson := false
+
+	for _, file := range reader.File {
+		// Security check: prevent path traversal
+		if strings.Contains(file.Name, "..") {
+			return fmt.Errorf("invalid file path in ZIP: %s", file.Name)
+		}
+
+		// Only extract required files
+		if file.Name != "rootfs.ext4" && file.Name != "plugin.json" {
+			continue
+		}
+
+		destPath := filepath.Join(destDir, file.Name)
+
+		fileReader, err := file.Open()
+		if err != nil {
+			return fmt.Errorf("failed to open file %s in ZIP: %v", file.Name, err)
+		}
+
+		destFile, err := os.Create(destPath)
+		if err != nil {
+			fileReader.Close()
+			return fmt.Errorf("failed to create file %s: %v", destPath, err)
+		}
+
+		_, err = io.Copy(destFile, fileReader)
+		fileReader.Close()
+		destFile.Close()
+
+		if err != nil {
+			return fmt.Errorf("failed to extract file %s: %v", file.Name, err)
+		}
+
+		if file.Name == "rootfs.ext4" {
+			hasRootfs = true
+		} else if file.Name == "plugin.json" {
+			hasPluginJson = true
+		}
+	}
+
+	if !hasRootfs {
+		return fmt.Errorf("rootfs.ext4 not found in plugin ZIP")
+	}
+	if !hasPluginJson {
+		return fmt.Errorf("plugin.json not found in plugin ZIP")
+	}
+
+	return nil
+}
+
+// parsePluginJson reads and parses plugin.json metadata
+func (cms *CMS) parsePluginJson(jsonPath string) (*Plugin, error) {
+	data, err := os.ReadFile(jsonPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read plugin.json: %v", err)
+	}
+
+	var metadata struct {
+		Slug        string                  `json:"slug"`
+		Name        string                  `json:"name"`
+		Description string                  `json:"description"`
+		Version     string                  `json:"version"`
+		Author      string                  `json:"author"`
+		Actions     map[string]PluginAction `json:"actions"`
+	}
+
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		return nil, fmt.Errorf("failed to parse plugin.json: %v", err)
+	}
+
+	// Validate required fields
+	if metadata.Slug == "" {
+		return nil, fmt.Errorf("plugin slug is required")
+	}
+	if metadata.Name == "" {
+		return nil, fmt.Errorf("plugin name is required")
+	}
+	if metadata.Version == "" {
+		return nil, fmt.Errorf("plugin version is required")
+	}
+
+	return &Plugin{
+		Slug:        metadata.Slug,
+		Name:        metadata.Name,
+		Description: metadata.Description,
+		Version:     metadata.Version,
+		Author:      metadata.Author,
+		Actions:     metadata.Actions,
+	}, nil
 }
 
 func generateID() string {

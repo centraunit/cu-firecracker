@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -65,6 +66,66 @@ func init() {
 	buildCmd.MarkFlagRequired("plugin")
 	pluginCmd.AddCommand(buildCmd)
 	rootCmd.AddCommand(startCmd, stopCmd, restartCmd, statusCmd, pluginCmd)
+}
+
+// copyFile copies a file from src to dst
+func copyFile(src, dst string) error {
+	sourceFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer sourceFile.Close()
+
+	destFile, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer destFile.Close()
+
+	_, err = destFile.ReadFrom(sourceFile)
+	return err
+}
+
+// createPluginZip creates a ZIP file containing rootfs.ext4 and plugin.json
+func createPluginZip(zipPath, rootfsPath, pluginJsonPath string) error {
+	zipFile, err := os.Create(zipPath)
+	if err != nil {
+		return err
+	}
+	defer zipFile.Close()
+
+	zipWriter := zip.NewWriter(zipFile)
+	defer zipWriter.Close()
+
+	// Add rootfs.ext4 to ZIP
+	if err := addFileToZip(zipWriter, rootfsPath, "rootfs.ext4"); err != nil {
+		return fmt.Errorf("failed to add rootfs.ext4 to ZIP: %w", err)
+	}
+
+	// Add plugin.json to ZIP
+	if err := addFileToZip(zipWriter, pluginJsonPath, "plugin.json"); err != nil {
+		return fmt.Errorf("failed to add plugin.json to ZIP: %w", err)
+	}
+
+	return nil
+}
+
+// addFileToZip adds a file to the ZIP archive
+func addFileToZip(zipWriter *zip.Writer, filePath, fileName string) error {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	writer, err := zipWriter.Create(fileName)
+	if err != nil {
+		return err
+	}
+
+	// Copy file content efficiently
+	_, err = file.WriteTo(writer)
+	return err
 }
 
 func main() {
@@ -151,15 +212,48 @@ func runPluginBuild(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("failed to build Docker image: %w", err)
 	}
 
-	outPath := filepath.Join(pluginDir, "build", buildName+".ext4")
-	fmt.Printf("Exporting to: %s\n", outPath)
+	// Create build directory
+	buildDir := filepath.Join(pluginDir, "build")
+	if err := os.MkdirAll(buildDir, 0755); err != nil {
+		_ = dockerRemove(image)
+		return fmt.Errorf("failed to create build directory: %w", err)
+	}
 
-	if err := exportExt4(image, outPath, sizeMB); err != nil {
+	// Export rootfs.ext4 to temp location
+	rootfsPath := filepath.Join(buildDir, "rootfs.ext4")
+	fmt.Printf("Exporting rootfs to: %s\n", rootfsPath)
+
+	if err := exportExt4(image, rootfsPath, sizeMB); err != nil {
 		_ = dockerRemove(image) // Clean up on failure
 		return err
 	}
 
-	fmt.Printf("✅ Plugin built successfully: %s\n", outPath)
+	// Copy plugin.json to build directory
+	pluginJsonSrc := filepath.Join(pluginDir, "plugin.json")
+	pluginJsonDest := filepath.Join(buildDir, "plugin.json")
+
+	if err := copyFile(pluginJsonSrc, pluginJsonDest); err != nil {
+		_ = dockerRemove(image)
+		return fmt.Errorf("failed to copy plugin.json: %w", err)
+	}
+
+	// Create ZIP file containing both rootfs.ext4 and plugin.json
+	zipPath := filepath.Join(buildDir, buildName+".zip")
+	fmt.Printf("Creating plugin ZIP: %s\n", zipPath)
+
+	if err := createPluginZip(zipPath, rootfsPath, pluginJsonDest); err != nil {
+		_ = dockerRemove(image)
+		return fmt.Errorf("failed to create plugin ZIP: %w", err)
+	}
+
+	// Clean up temporary files
+	os.Remove(rootfsPath)
+	os.Remove(pluginJsonDest)
+
+	fmt.Printf("✅ Plugin packaged successfully: %s\n", zipPath)
+	fmt.Printf("📁 ZIP contains: rootfs.ext4 + plugin.json\n")
+	fmt.Printf("📤 Ready to upload to CMS!\n")
+
 	_ = dockerRemove(image)
 	return nil
 }
