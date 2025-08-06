@@ -329,6 +329,106 @@ func (vm *VMManager) GetVMIP(instanceID string) (string, error) {
 	return "192.168.127.2", nil
 }
 
+// ResumeFromSnapshot starts a new VM instance from an existing snapshot
+func (vm *VMManager) ResumeFromSnapshot(instanceID string, plugin *Plugin) error {
+	snapshotPath := vm.GetSnapshotPath(plugin.Slug)
+	memPath := snapshotPath + ".mem"
+
+	// Check if snapshot files exist
+	if !vm.HasSnapshot(plugin.Slug) {
+		return fmt.Errorf("snapshot not found for plugin %s", plugin.Slug)
+	}
+
+	vm.mutex.Lock()
+	defer vm.mutex.Unlock()
+
+	logger.Info("Resuming VM from snapshot", "instance_id", instanceID, "plugin_slug", plugin.Slug, "snapshot_path", snapshotPath)
+
+	// Allocate IP for the resumed VM
+	vmIP, err := vm.allocateIP(instanceID)
+	if err != nil {
+		return fmt.Errorf("failed to allocate IP: %v", err)
+	}
+
+	// Setup networking (same as StartVM)
+	tapName := fmt.Sprintf("tap-%s", instanceID[len(instanceID)-8:])
+
+	// Create tap interface
+	cmd := exec.Command("ip", "tuntap", "add", "dev", tapName, "mode", "tap")
+	if err := cmd.Run(); err != nil {
+		logger.Error("Failed to create tap interface", "instance_id", instanceID, "tap", tapName, "error", err)
+		vm.deallocateIP(instanceID)
+		return fmt.Errorf("failed to create tap interface: %v", err)
+	}
+
+	// Create temporary directory for VM
+	vmDir := filepath.Join("/tmp", "firecracker-"+instanceID)
+	if err := os.MkdirAll(vmDir, 0755); err != nil {
+		vm.deallocateIP(instanceID)
+		return fmt.Errorf("failed to create VM directory: %v", err)
+	}
+	socketPath := filepath.Join(vmDir, "firecracker.sock")
+
+	// Build kernel args with allocated IP (same as regular VM)
+	kernelArgs := fmt.Sprintf("console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw ip=%s::192.168.127.1:255.255.255.0:::off:1.1.1.1:1.0.0.1:", vmIP)
+
+	// Create Firecracker config with snapshot resumption
+	cfg := firecracker.Config{
+		SocketPath:      socketPath,
+		KernelImagePath: vm.kernelPath,
+		KernelArgs:      kernelArgs,
+		LogLevel:        "Info",
+		FifoLogWriter:   &FirecrackerLogWriter{instanceID: instanceID},
+		Drives: []models.Drive{
+			{
+				DriveID:      firecracker.String("rootfs"),
+				PathOnHost:   firecracker.String(plugin.RootFSPath),
+				IsReadOnly:   firecracker.Bool(false),
+				IsRootDevice: firecracker.Bool(true),
+			},
+		},
+		MachineCfg: models.MachineConfiguration{
+			VcpuCount:  firecracker.Int64(1),
+			MemSizeMib: firecracker.Int64(128),
+		},
+		NetworkInterfaces: []firecracker.NetworkInterface{
+			{
+				StaticConfiguration: &firecracker.StaticNetworkConfiguration{
+					HostDevName: tapName,
+				},
+			},
+		},
+	}
+
+	// Create machine with snapshot resumption option
+	machine, err := firecracker.NewMachine(
+		context.Background(),
+		cfg,
+		firecracker.WithSnapshot(memPath, snapshotPath),
+	)
+
+	if err != nil {
+		vm.deallocateIP(instanceID)
+		return fmt.Errorf("failed to create machine from snapshot: %v", err)
+	}
+
+	// Start the machine (resume from snapshot - should be ~100-200ms)
+	if err := machine.Start(context.Background()); err != nil {
+		vm.deallocateIP(instanceID)
+		return fmt.Errorf("failed to start machine from snapshot: %v", err)
+	}
+
+	// Store the machine instance
+	vm.instances[instanceID] = machine
+
+	logger.Info("VM resumed from snapshot successfully",
+		"instance_id", instanceID,
+		"vm_ip", vmIP,
+		"plugin_slug", plugin.Slug)
+
+	return nil
+}
+
 // FirecrackerLogWriter implements io.Writer to redirect Firecracker logs to our structured logger
 type FirecrackerLogWriter struct {
 	instanceID string
@@ -403,3 +503,84 @@ func (vm *VMManager) ExecuteInVM(instanceID string, request map[string]interface
 	logger.Info("Successfully executed command in VM via HTTP", "instance_id", instanceID, "vm_ip", vmIP, "response_size", len(responseBytes))
 	return response, nil
 }
+
+// CreateSnapshot creates a snapshot of a running VM for fast resumption
+func (vm *VMManager) CreateSnapshot(instanceID string, snapshotPath string) error {
+	vm.mutex.RLock()
+	machine, exists := vm.instances[instanceID]
+	vm.mutex.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("VM instance %s not found", instanceID)
+	}
+
+	logger.Info("Creating snapshot", "instance_id", instanceID, "snapshot_path", snapshotPath)
+
+	// Ensure snapshot directory exists
+	if err := os.MkdirAll(filepath.Dir(snapshotPath), 0755); err != nil {
+		return fmt.Errorf("failed to create snapshot directory: %v", err)
+	}
+
+	// Step 1: Pause the VM (required for snapshotting)
+	logger.Debug("Pausing VM for snapshot creation", "instance_id", instanceID)
+	if err := machine.PauseVM(context.Background()); err != nil {
+		return fmt.Errorf("failed to pause VM for snapshot: %v", err)
+	}
+
+	// Step 2: Create the snapshot using Machine.CreateSnapshot API
+	memFilePath := snapshotPath + ".mem"
+	err := machine.CreateSnapshot(context.Background(), memFilePath, snapshotPath)
+
+	// Step 3: Resume the VM regardless of snapshot success/failure
+	logger.Debug("Resuming VM after snapshot attempt", "instance_id", instanceID)
+	if resumeErr := machine.ResumeVM(context.Background()); resumeErr != nil {
+		logger.Error("Failed to resume VM after snapshot", "instance_id", instanceID, "error", resumeErr)
+		// If snapshot succeeded but resume failed, that's still an error
+		if err == nil {
+			err = fmt.Errorf("snapshot created but failed to resume VM: %v", resumeErr)
+		}
+	}
+
+	// Return snapshot creation error if any
+	if err != nil {
+		return fmt.Errorf("failed to create snapshot: %v", err)
+	}
+
+	logger.Info("Snapshot created successfully", "instance_id", instanceID, "snapshot_path", snapshotPath)
+	return nil
+}
+
+// GetSnapshotPath returns the standard snapshot path for a plugin slug
+func (vm *VMManager) GetSnapshotPath(pluginSlug string) string {
+	return filepath.Join(vm.snapshotDir, pluginSlug+".snapshot")
+}
+
+// HasSnapshot checks if a snapshot exists for the given plugin slug
+func (vm *VMManager) HasSnapshot(pluginSlug string) bool {
+	snapshotPath := vm.GetSnapshotPath(pluginSlug)
+	memPath := snapshotPath + ".mem"
+
+	// Both files must exist for a valid snapshot
+	_, err1 := os.Stat(snapshotPath)
+	_, err2 := os.Stat(memPath)
+
+	return err1 == nil && err2 == nil
+}
+
+// DeleteSnapshot removes snapshot files for a plugin
+func (vm *VMManager) DeleteSnapshot(pluginSlug string) error {
+	snapshotPath := vm.GetSnapshotPath(pluginSlug)
+	memPath := snapshotPath + ".mem"
+
+	// Remove both snapshot files (ignore errors if files don't exist)
+	os.Remove(snapshotPath)
+	os.Remove(memPath)
+
+	logger.Info("Deleted snapshot files", "plugin_slug", pluginSlug, "snapshot_path", snapshotPath)
+	return nil
+}
+
+// Helper functions for pointer conversion
+func stringPtr(s string) *string { return &s }
+func int64Ptr(i int64) *int64    { return &i }
+func boolPtr(b bool) *bool       { return &b }

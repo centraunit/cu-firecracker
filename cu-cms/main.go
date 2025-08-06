@@ -136,6 +136,7 @@ type VMManager struct {
 	ipPool          map[string]string // instanceID -> IP mapping
 	usedIPs         map[string]bool   // IP -> used status
 	nextIP          int               // Next available IP (2-254)
+	snapshotDir     string            // Directory for storing plugin snapshots
 	mutex           sync.RWMutex
 }
 
@@ -149,6 +150,11 @@ func NewCMS() *CMS {
 
 	// Load existing plugins from disk
 	cms.loadPlugins()
+
+	// Initialize snapshot directory
+	if err := cms.vmManager.initSnapshotDir(); err != nil {
+		logger.Error("Failed to initialize snapshot directory", "error", err)
+	}
 
 	return cms
 }
@@ -171,8 +177,14 @@ func NewVMManager() *VMManager {
 		instances:       make(map[string]*firecracker.Machine),
 		ipPool:          make(map[string]string),
 		usedIPs:         make(map[string]bool),
-		nextIP:          2, // Start from 192.168.127.2
+		nextIP:          2,                  // Start from 192.168.127.2
+		snapshotDir:     "./data/snapshots", // Directory for plugin snapshots
 	}
+}
+
+// initSnapshotDir creates the snapshot directory if it doesn't exist
+func (vm *VMManager) initSnapshotDir() error {
+	return os.MkdirAll(vm.snapshotDir, 0755)
 }
 
 // Start starts the CMS web server
@@ -182,24 +194,15 @@ func (cms *CMS) Start(port string) error {
 	// Plugin management endpoints
 	r.HandleFunc("/api/plugins", cms.handleListPlugins).Methods("GET")
 	r.HandleFunc("/api/plugins", cms.handleUploadPlugin).Methods("POST")
-	r.HandleFunc("/api/plugins/{id}", cms.handleGetPlugin).Methods("GET")
-	r.HandleFunc("/api/plugins/{id}", cms.handleDeletePlugin).Methods("DELETE")
+	r.HandleFunc("/api/plugins/{slug}", cms.handleGetPlugin).Methods("GET")
+	r.HandleFunc("/api/plugins/{slug}", cms.handleDeletePlugin).Methods("DELETE")
 
 	// Plugin activation endpoints
 	r.HandleFunc("/api/plugins/{slug}/activate", cms.handleActivatePlugin).Methods("POST")
 	r.HandleFunc("/api/plugins/{slug}/deactivate", cms.handleDeactivatePlugin).Methods("POST")
 
-	// SINGLE EXECUTE ENDPOINT (WordPress-style)
+	// Action execution endpoint (WordPress-style)
 	r.HandleFunc("/api/execute", cms.handleExecuteAction).Methods("POST")
-
-	// VM instance endpoints (legacy - might be removed later)
-	r.HandleFunc("/api/instances", cms.handleListInstances).Methods("GET")
-	r.HandleFunc("/api/instances", cms.handleCreateInstance).Methods("POST")
-	r.HandleFunc("/api/instances/{id}", cms.handleGetInstance).Methods("GET")
-	r.HandleFunc("/api/instances/{id}", cms.handleDeleteInstance).Methods("DELETE")
-
-	// Plugin execution endpoint (legacy - use /api/execute instead)
-	r.HandleFunc("/api/plugins/{id}/execute", cms.handleExecutePlugin).Methods("POST")
 
 	// Health check
 	r.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -490,7 +493,7 @@ func (cms *CMS) handleUploadPlugin(w http.ResponseWriter, r *http.Request) {
 // handleGetPlugin returns a specific plugin by slug
 func (cms *CMS) handleGetPlugin(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
-	pluginSlug := vars["id"] // Using 'id' but it's actually a slug now
+	pluginSlug := vars["slug"] // Using 'id' but it's actually a slug now
 
 	logger.Debug("Handling get plugin request",
 		"plugin_slug", pluginSlug,
@@ -517,7 +520,7 @@ func (cms *CMS) handleGetPlugin(w http.ResponseWriter, r *http.Request) {
 // handleDeletePlugin deletes a plugin by slug
 func (cms *CMS) handleDeletePlugin(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
-	pluginSlug := vars["id"] // Using 'id' but it's actually a slug now
+	pluginSlug := vars["slug"] // Using 'id' but it's actually a slug now
 
 	logger.Debug("Handling delete plugin request",
 		"plugin_slug", pluginSlug,
@@ -556,260 +559,6 @@ func (cms *CMS) handleDeletePlugin(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusNoContent)
 }
-
-// handleListInstances returns all VM instances
-func (cms *CMS) handleListInstances(w http.ResponseWriter, r *http.Request) {
-	logger.Debug("Handling list instances request",
-		"method", r.Method,
-		"url", r.URL.String(),
-	)
-
-	cms.mutex.RLock()
-	defer cms.mutex.RUnlock()
-
-	instances := make([]*VMInstance, 0, len(cms.instances))
-	for _, instance := range cms.instances {
-		instances = append(instances, instance)
-	}
-
-	logger.Info("Listed instances", "count", len(instances))
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(instances)
-}
-
-// handleCreateInstance creates a new VM instance
-func (cms *CMS) handleCreateInstance(w http.ResponseWriter, r *http.Request) {
-	logger.Debug("Handling create instance request",
-		"method", r.Method,
-		"url", r.URL.String(),
-	)
-
-	var req struct {
-		PluginSlug string `json:"plugin_slug"`
-	}
-
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		logger.Error("Failed to decode create instance request", "error", err)
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
-	}
-
-	logger.Debug("Creating instance", "plugin_slug", req.PluginSlug)
-
-	cms.mutex.RLock()
-	plugin, exists := cms.plugins[req.PluginSlug]
-	cms.mutex.RUnlock()
-
-	if !exists {
-		logger.Warn("Plugin not found for instance creation", "plugin_slug", req.PluginSlug)
-		http.Error(w, "Plugin not found", http.StatusNotFound)
-		return
-	}
-
-	instanceID := generateID()
-	instance := &VMInstance{
-		ID:         instanceID,
-		PluginSlug: req.PluginSlug,
-		Status:     "creating",
-		CreatedAt:  time.Now(),
-	}
-
-	logger.Info("Creating new instance",
-		"instance_id", instanceID,
-		"plugin_slug", req.PluginSlug,
-		"plugin_name", plugin.Name,
-	)
-
-	// Start VM in background
-	go func() {
-		if err := cms.vmManager.StartVM(instanceID, plugin); err != nil {
-			logger.Error("Failed to start VM", "instance_id", instanceID, "plugin_slug", req.PluginSlug, "error", err)
-			cms.mutex.Lock()
-			instance.Status = "failed"
-			cms.mutex.Unlock()
-		} else {
-			logger.Info("VM instance started successfully",
-				"instance_id", instanceID,
-				"plugin_slug", req.PluginSlug,
-			)
-			cms.mutex.Lock()
-			instance.Status = "running"
-			cms.mutex.Unlock()
-		}
-	}()
-
-	cms.mutex.Lock()
-	cms.instances[instanceID] = instance
-	cms.mutex.Unlock()
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(instance)
-}
-
-// handleGetInstance returns a specific VM instance
-func (cms *CMS) handleGetInstance(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	instanceID := vars["id"]
-
-	logger.Debug("Handling get instance request",
-		"instance_id", instanceID,
-		"method", r.Method,
-		"url", r.URL.String(),
-	)
-
-	cms.mutex.RLock()
-	instance, exists := cms.instances[instanceID]
-	cms.mutex.RUnlock()
-
-	if !exists {
-		logger.Warn("Instance not found", "instance_id", instanceID)
-		http.Error(w, "Instance not found", http.StatusNotFound)
-		return
-	}
-
-	logger.Debug("Retrieved instance", "instance_id", instanceID, "status", instance.Status)
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(instance)
-}
-
-// handleDeleteInstance stops and deletes a VM instance
-func (cms *CMS) handleDeleteInstance(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	instanceID := vars["id"]
-
-	logger.Debug("Handling delete instance request",
-		"instance_id", instanceID,
-		"method", r.Method,
-		"url", r.URL.String(),
-	)
-
-	cms.mutex.Lock()
-	_, exists := cms.instances[instanceID]
-	if !exists {
-		cms.mutex.Unlock()
-		logger.Warn("Instance not found for deletion", "instance_id", instanceID)
-		http.Error(w, "Instance not found", http.StatusNotFound)
-		return
-	}
-	delete(cms.instances, instanceID)
-	cms.mutex.Unlock()
-
-	logger.Info("Deleting VM instance", "instance_id", instanceID)
-
-	// Stop VM
-	if err := cms.vmManager.StopVM(instanceID); err != nil {
-		logger.Error("Failed to stop VM", "instance_id", instanceID, "error", err)
-	} else {
-		logger.Info("VM instance stopped successfully", "instance_id", instanceID)
-	}
-
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// handleExecutePlugin executes a plugin via HTTP request to the microVM
-func (cms *CMS) handleExecutePlugin(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	pluginSlug := vars["id"] // URL param is "id" but it's actually a slug
-
-	logger.Debug("Handling plugin execution request",
-		"plugin_slug", pluginSlug,
-		"method", r.Method,
-		"url", r.URL.String(),
-		"content_length", r.ContentLength,
-	)
-
-	cms.mutex.RLock()
-	plugin, exists := cms.plugins[pluginSlug]
-	if !exists {
-		cms.mutex.RUnlock()
-		logger.Warn("Plugin not found for execution", "plugin_slug", pluginSlug)
-		http.Error(w, "Plugin not found", http.StatusNotFound)
-		return
-	}
-	cms.mutex.RUnlock()
-
-	// Parse request body for action and data
-	var requestBody map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
-		logger.Error("Failed to parse execution request body", "error", err)
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
-	}
-
-	action, _ := requestBody["action"].(string)
-	if action == "" {
-		action = "default"
-	}
-
-	logger.Info("Executing plugin",
-		"plugin_slug", pluginSlug,
-		"plugin_name", plugin.Name,
-		"action", action,
-		"request_data", requestBody,
-	)
-
-	// Generate a unique instance ID for this execution
-	instanceID := generateID()
-
-	logger.Debug("Starting VM for plugin execution",
-		"instance_id", instanceID,
-		"plugin_slug", pluginSlug,
-		"rootfs_path", plugin.RootFSPath,
-	)
-
-	// Start the Firecracker microVM
-	if err := cms.vmManager.StartVM(instanceID, plugin); err != nil {
-		logger.Error("Failed to start VM for plugin execution", "plugin_slug", pluginSlug, "instance_id", instanceID, "error", err)
-		http.Error(w, "Failed to start plugin VM", http.StatusInternalServerError)
-		return
-	}
-
-	logger.Debug("VM started, executing command in VM", "instance_id", instanceID)
-
-	// Execute the command in the VM via stdin/stdout
-	pluginRequest := map[string]interface{}{
-		"action": action,
-		"data":   requestBody["data"],
-	}
-
-	result, err := cms.vmManager.ExecuteInVM(instanceID, pluginRequest)
-	if err != nil {
-		logger.Error("Failed to execute command in VM", "plugin_slug", pluginSlug, "instance_id", instanceID, "error", err)
-		http.Error(w, "Plugin execution failed", http.StatusInternalServerError)
-		return
-	}
-
-	logger.Info("Plugin execution completed successfully",
-		"plugin_slug", pluginSlug,
-		"instance_id", instanceID,
-		"action", action,
-		"result", result,
-	)
-
-	response := map[string]interface{}{
-		"plugin_slug": pluginSlug,
-		"status":      "executed",
-		"action":      action,
-		"result":      result,
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
-
-	// Stop the VM immediately after execution (Lambda-like behavior)
-	go func() {
-		if err := cms.vmManager.StopVM(instanceID); err != nil {
-			logger.Error("Failed to stop VM after execution", "instance_id", instanceID, "error", err)
-		} else {
-			logger.Info("VM stopped successfully after execution", "instance_id", instanceID)
-		}
-	}()
-}
-
-// OLD DISCOVERY FUNCTIONS REMOVED - we now use plugin.json from ZIP files
 
 // savePlugins saves plugins to persistent storage
 func (cms *CMS) savePlugins() error {
@@ -910,19 +659,60 @@ func (cms *CMS) makeHTTPRequest(method, url string, body interface{}) (map[strin
 	return result, nil
 }
 
-// handleActivatePlugin activates a plugin
+// healthCheckWithRetries performs health check with retry logic
+func (cms *CMS) healthCheckWithRetries(vmIP, pluginSlug string, maxRetries int, retryDelay time.Duration) error {
+	healthURL := fmt.Sprintf("http://%s:80/health", vmIP)
+
+	var lastErr error
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		response, err := cms.makeHTTPRequest("GET", healthURL, nil)
+		if err != nil {
+			lastErr = err
+			logger.Debug("Health check failed, retrying",
+				"plugin_slug", pluginSlug,
+				"attempt", attempt,
+				"max_retries", maxRetries,
+				"error", err)
+
+			if attempt < maxRetries {
+				time.Sleep(retryDelay)
+				continue
+			}
+		} else {
+			// Validate health response
+			if status, ok := response["status"].(string); ok && status == "healthy" {
+				logger.Info("Health check successful",
+					"plugin_slug", pluginSlug,
+					"attempt", attempt)
+				return nil
+			} else {
+				lastErr = fmt.Errorf("unhealthy status response: %v", response)
+				logger.Debug("Health check returned unhealthy status, retrying",
+					"plugin_slug", pluginSlug,
+					"attempt", attempt,
+					"response", response)
+
+				if attempt < maxRetries {
+					time.Sleep(retryDelay)
+					continue
+				}
+			}
+		}
+	}
+
+	return fmt.Errorf("health check failed after %d attempts: %v", maxRetries, lastErr)
+}
+
+// handleActivatePlugin activates a plugin and creates snapshot for fast execution
 func (cms *CMS) handleActivatePlugin(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	pluginSlug := vars["slug"]
-
-	logger.Debug("Handling activate plugin request", "plugin_slug", pluginSlug)
 
 	cms.mutex.Lock()
 	defer cms.mutex.Unlock()
 
 	plugin, exists := cms.plugins[pluginSlug]
 	if !exists {
-		logger.Warn("Plugin not found for activation", "plugin_slug", pluginSlug)
 		http.Error(w, "Plugin not found", http.StatusNotFound)
 		return
 	}
@@ -930,7 +720,70 @@ func (cms *CMS) handleActivatePlugin(w http.ResponseWriter, r *http.Request) {
 	if plugin.Status == "active" {
 		logger.Info("Plugin already active", "plugin_slug", pluginSlug)
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "already_active"})
+		json.NewEncoder(w).Encode(plugin)
+		return
+	}
+
+	// If snapshot already exists, just mark as active
+	if cms.vmManager.HasSnapshot(pluginSlug) {
+		logger.Info("Plugin has existing snapshot, marking as active", "plugin_slug", pluginSlug)
+		plugin.Status = "active"
+		plugin.UpdatedAt = time.Now()
+
+		if err := cms.savePlugins(); err != nil {
+			logger.Error("Failed to save plugins after activation", "error", err)
+			http.Error(w, "Failed to save plugin state", http.StatusInternalServerError)
+			return
+		}
+
+		logger.Info("Plugin activated with existing snapshot", "plugin_slug", pluginSlug)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(plugin)
+		return
+	}
+
+	// Create temporary VM to warm up and take snapshot
+	instanceID := pluginSlug // Use plugin slug as instance ID for consistency
+	logger.Info("Creating VM for snapshot generation", "plugin_slug", pluginSlug, "instance_id", instanceID)
+
+	if err := cms.vmManager.StartVM(instanceID, plugin); err != nil {
+		logger.Error("Failed to start VM for snapshot", "plugin_slug", pluginSlug, "error", err)
+		http.Error(w, "Failed to start VM", http.StatusInternalServerError)
+		return
+	}
+
+	// Clean up temporary VM after snapshotting
+	defer func() {
+		if stopErr := cms.vmManager.StopVM(instanceID); stopErr != nil {
+			logger.Error("Failed to stop temporary VM after snapshot", "instance_id", instanceID, "error", stopErr)
+		}
+	}()
+
+	// Wait for VM to be fully ready (plugin app started)
+	time.Sleep(3 * time.Second)
+
+	// Perform health check to ensure VM is ready (with retries for Flask startup)
+	vmIP, exists := cms.vmManager.getVMIP(instanceID)
+	if !exists {
+		logger.Error("Failed to get VM IP for snapshot", "plugin_slug", pluginSlug)
+		http.Error(w, "Failed to get VM IP", http.StatusInternalServerError)
+		return
+	}
+
+	if err := cms.healthCheckWithRetries(vmIP, pluginSlug, 15, 1*time.Second); err != nil {
+		logger.Error("VM health check failed during activation after retries",
+			"plugin_slug", pluginSlug,
+			"attempts", 15,
+			"error", err)
+		http.Error(w, "Plugin failed health check", http.StatusInternalServerError)
+		return
+	}
+
+	// Create snapshot for fast future execution
+	snapshotPath := cms.vmManager.GetSnapshotPath(pluginSlug)
+	if err := cms.vmManager.CreateSnapshot(instanceID, snapshotPath); err != nil {
+		logger.Error("Failed to create snapshot", "plugin_slug", pluginSlug, "error", err)
+		http.Error(w, "Failed to create snapshot", http.StatusInternalServerError)
 		return
 	}
 
@@ -940,29 +793,41 @@ func (cms *CMS) handleActivatePlugin(w http.ResponseWriter, r *http.Request) {
 	// Save to registry
 	if err := cms.savePlugins(); err != nil {
 		logger.Error("Failed to save plugins after activation", "error", err)
+		http.Error(w, "Failed to save plugin state", http.StatusInternalServerError)
+		return
 	}
 
-	logger.Info("Plugin activated successfully", "plugin_slug", pluginSlug)
+	logger.Info("Plugin activated successfully with snapshot", "plugin_slug", pluginSlug, "snapshot_path", snapshotPath)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(plugin)
 }
 
-// handleDeactivatePlugin deactivates a plugin
+// handleDeactivatePlugin deactivates a plugin and cleans up snapshots
 func (cms *CMS) handleDeactivatePlugin(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	pluginSlug := vars["slug"]
-
-	logger.Debug("Handling deactivate plugin request", "plugin_slug", pluginSlug)
 
 	cms.mutex.Lock()
 	defer cms.mutex.Unlock()
 
 	plugin, exists := cms.plugins[pluginSlug]
 	if !exists {
-		logger.Warn("Plugin not found for deactivation", "plugin_slug", pluginSlug)
 		http.Error(w, "Plugin not found", http.StatusNotFound)
 		return
+	}
+
+	if plugin.Status == "inactive" {
+		logger.Info("Plugin already inactive", "plugin_slug", pluginSlug)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(plugin)
+		return
+	}
+
+	// Delete snapshot files
+	if err := cms.vmManager.DeleteSnapshot(pluginSlug); err != nil {
+		logger.Warn("Failed to delete snapshot during deactivation", "plugin_slug", pluginSlug, "error", err)
+		// Continue with deactivation even if snapshot deletion fails
 	}
 
 	plugin.Status = "inactive"
@@ -971,6 +836,8 @@ func (cms *CMS) handleDeactivatePlugin(w http.ResponseWriter, r *http.Request) {
 	// Save to registry
 	if err := cms.savePlugins(); err != nil {
 		logger.Error("Failed to save plugins after deactivation", "error", err)
+		http.Error(w, "Failed to save plugin state", http.StatusInternalServerError)
+		return
 	}
 
 	logger.Info("Plugin deactivated successfully", "plugin_slug", pluginSlug)
@@ -1079,13 +946,28 @@ func (cms *CMS) handleExecuteAction(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-// executePluginAction executes a specific action on a specific plugin
+// executePluginAction executes action with snapshot resumption for fast startup
 func (cms *CMS) executePluginAction(plugin *Plugin, action PluginAction, hook string, payload map[string]interface{}) (map[string]interface{}, error) {
-	// Generate instance ID for this execution
-	instanceID := generateID()
+	// Use plugin slug as instance ID for consistency
+	instanceID := plugin.Slug
 
-	// Start VM for the plugin (TODO: Use snapshots for performance)
-	if err := cms.vmManager.StartVM(instanceID, plugin); err != nil {
+	logger.Debug("Starting VM for action execution",
+		"plugin_slug", plugin.Slug,
+		"action_hook", hook,
+		"has_snapshot", cms.vmManager.HasSnapshot(plugin.Slug),
+		"instance_id", instanceID)
+
+	var err error
+	// Try snapshot resumption first (fast ~100-200ms), fallback to regular start
+	if cms.vmManager.HasSnapshot(plugin.Slug) {
+		logger.Debug("Using snapshot resumption for fast startup", "plugin_slug", plugin.Slug)
+		err = cms.vmManager.ResumeFromSnapshot(instanceID, plugin)
+	} else {
+		logger.Debug("No snapshot available, using regular VM startup", "plugin_slug", plugin.Slug)
+		err = cms.vmManager.StartVM(instanceID, plugin)
+	}
+
+	if err != nil {
 		return nil, fmt.Errorf("failed to start VM: %v", err)
 	}
 
@@ -1095,6 +977,9 @@ func (cms *CMS) executePluginAction(plugin *Plugin, action PluginAction, hook st
 			logger.Error("Failed to stop VM after action execution", "instance_id", instanceID, "error", stopErr)
 		}
 	}()
+
+	// Brief wait for snapshot resumption to complete (max 200ms)
+	time.Sleep(200 * time.Millisecond)
 
 	// Get VM IP
 	vmIP, exists := cms.vmManager.getVMIP(instanceID)
@@ -1108,14 +993,20 @@ func (cms *CMS) executePluginAction(plugin *Plugin, action PluginAction, hook st
 		"payload": payload,
 	}
 
-	// Make request to plugin action endpoint
+	// Execute action via HTTP
 	actionURL := fmt.Sprintf("http://%s:80%s", vmIP, action.Endpoint)
-	result, err := cms.makeHTTPRequest("POST", actionURL, pluginRequest)
+	response, err := cms.makeHTTPRequest(action.Method, actionURL, pluginRequest)
 	if err != nil {
-		return nil, fmt.Errorf("failed to execute plugin action: %v", err)
+		return nil, fmt.Errorf("failed to execute action: %v", err)
 	}
 
-	return result, nil
+	logger.Info("Action executed successfully via snapshot resumption",
+		"plugin_slug", plugin.Slug,
+		"action_hook", hook,
+		"vm_ip", vmIP,
+		"used_snapshot", cms.vmManager.HasSnapshot(plugin.Slug))
+
+	return response, nil
 }
 
 // extractPluginZip extracts a plugin ZIP file containing rootfs.ext4 and plugin.json
@@ -1243,7 +1134,7 @@ func (cms *CMS) verifyPluginHealth(plugin *Plugin) error {
 	logger.Debug("Starting health check VM", "plugin_slug", plugin.Slug)
 
 	// Generate temporary instance ID for health check
-	healthCheckID := "health-" + generateID()
+	healthCheckID := "health-" + plugin.Slug
 
 	// Start temporary VM for health check
 	err := cms.vmManager.StartVM(healthCheckID, plugin)
@@ -1264,41 +1155,16 @@ func (cms *CMS) verifyPluginHealth(plugin *Plugin) error {
 		return fmt.Errorf("VM IP not found for health check instance %s", healthCheckID)
 	}
 
-	// Try to reach health endpoint with retries (give Flask more time to start)
-	maxRetries := 15              // Increased from 10
-	retryDelay := 1 * time.Second // Increased from 500ms
-
-	// Initial wait for Flask to fully start
-	logger.Debug("Waiting for Flask to start", "plugin_slug", plugin.Slug)
-	time.Sleep(3 * time.Second)
-
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		logger.Debug("Health check attempt",
+	if err := cms.healthCheckWithRetries(vmIP, plugin.Slug, 15, 1*time.Second); err != nil {
+		logger.Error("VM health check failed during activation after retries",
 			"plugin_slug", plugin.Slug,
-			"attempt", attempt,
-			"vm_ip", vmIP)
-
-		healthURL := fmt.Sprintf("http://%s:80/health", vmIP)
-		result, err := cms.makeHTTPRequest("GET", healthURL, nil)
-
-		if err == nil {
-			// Check if the response indicates healthy status
-			if status, ok := result["status"].(string); ok && status == "healthy" {
-				logger.Info("Plugin health check passed", "plugin_slug", plugin.Slug)
-				return nil
-			}
-		}
-
-		if attempt < maxRetries {
-			time.Sleep(retryDelay)
-		}
+			"attempts", 15,
+			"error", err)
+		return fmt.Errorf("plugin failed health check after %d attempts", 15)
 	}
 
-	return fmt.Errorf("plugin failed health check after %d attempts", maxRetries)
-}
-
-func generateID() string {
-	return fmt.Sprintf("%d", time.Now().UnixNano())
+	logger.Info("Plugin health check passed", "plugin_slug", plugin.Slug)
+	return nil
 }
 
 func main() {
