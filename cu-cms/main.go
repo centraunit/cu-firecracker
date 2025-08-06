@@ -771,8 +771,7 @@ func (cms *CMS) handleExecutePlugin(w http.ResponseWriter, r *http.Request) {
 
 // savePlugins saves plugins to persistent storage
 func (cms *CMS) savePlugins() error {
-	cms.mutex.RLock()
-	defer cms.mutex.RUnlock()
+	// Note: Caller must hold cms.mutex.Lock() or cms.mutex.RLock()
 
 	pluginsDir := "/app/data/plugins"
 	if err := os.MkdirAll(pluginsDir, 0755); err != nil {
