@@ -184,7 +184,7 @@ func (vm *VMManager) StartVM(instanceID string, plugin *Plugin) error {
 	cfg := firecracker.Config{
 		SocketPath:      fmt.Sprintf("/tmp/firecracker-%s.sock", instanceID),
 		KernelImagePath: vm.kernelPath,
-		KernelArgs:      fmt.Sprintf("console=ttyS0 noapic reboot=k panic=1 pci=off random.trust_cpu=on root=/dev/vda rw ip=%s::192.168.127.1:255.255.255.0::eth0:off:::", vmIP),
+		KernelArgs:      fmt.Sprintf("console=ttyS0 noapic reboot=k panic=1 pci=off random.trust_cpu=on rootfstype=ext4 rw init=/sbin/init ip=%s::192.168.127.1:255.255.255.0::eth0:off:::", vmIP),
 		Drives: []models.Drive{{
 			DriveID:      firecracker.String("rootfs"),
 			IsRootDevice: firecracker.Bool(true),
@@ -390,7 +390,7 @@ func (vm *VMManager) ResumeFromSnapshot(instanceID string, plugin *Plugin) error
 	cfg := firecracker.Config{
 		SocketPath:      fmt.Sprintf("/tmp/firecracker-%s.sock", instanceID),
 		KernelImagePath: vm.kernelPath,
-		KernelArgs:      fmt.Sprintf("console=ttyS0 noapic reboot=k panic=1 pci=off random.trust_cpu=on root=/dev/vda rw ip=%s::192.168.127.1:255.255.255.0::eth0:off:::", vmIP),
+		KernelArgs:      fmt.Sprintf("console=ttyS0 noapic reboot=k panic=1 pci=off random.trust_cpu=on rootfstype=ext4 rw ip=%s::192.168.127.1:255.255.255.0::eth0:off:::", vmIP),
 		Drives: []models.Drive{{
 			DriveID:      firecracker.String("rootfs"),
 			IsRootDevice: firecracker.Bool(true),
