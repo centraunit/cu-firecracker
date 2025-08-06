@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -185,7 +184,7 @@ func (vm *VMManager) StartVM(instanceID string, plugin *Plugin) error {
 	cfg := firecracker.Config{
 		SocketPath:      fmt.Sprintf("/tmp/firecracker-%s.sock", instanceID),
 		KernelImagePath: vm.kernelPath,
-		KernelArgs:      "ro console=ttyS0 noapic reboot=k panic=1 pci=off nomodules random.trust_cpu=on",
+		KernelArgs:      fmt.Sprintf("console=ttyS0 noapic reboot=k panic=1 pci=off random.trust_cpu=on root=/dev/vda rw ip=%s::192.168.127.1:255.255.255.0::eth0:off:::", vmIP),
 		Drives: []models.Drive{{
 			DriveID:      firecracker.String("rootfs"),
 			IsRootDevice: firecracker.Bool(true),
@@ -200,14 +199,6 @@ func (vm *VMManager) StartVM(instanceID string, plugin *Plugin) error {
 			StaticConfiguration: &firecracker.StaticNetworkConfiguration{
 				MacAddress:  fmt.Sprintf("02:FC:00:00:%02x:%02x", byte(vm.nextIP), byte(vm.nextIP+1)),
 				HostDevName: tapName,
-				IPConfiguration: &firecracker.IPConfiguration{
-					IPAddr: net.IPNet{
-						IP:   net.ParseIP(vmIP),
-						Mask: net.IPMask(net.ParseIP("255.255.255.0").To4()),
-					},
-					Gateway: net.ParseIP("192.168.127.1"),
-					IfName:  "eth0",
-				},
 			},
 		}},
 	}
@@ -399,7 +390,7 @@ func (vm *VMManager) ResumeFromSnapshot(instanceID string, plugin *Plugin) error
 	cfg := firecracker.Config{
 		SocketPath:      fmt.Sprintf("/tmp/firecracker-%s.sock", instanceID),
 		KernelImagePath: vm.kernelPath,
-		KernelArgs:      "ro console=ttyS0 noapic reboot=k panic=1 pci=off nomodules random.trust_cpu=on",
+		KernelArgs:      fmt.Sprintf("console=ttyS0 noapic reboot=k panic=1 pci=off random.trust_cpu=on root=/dev/vda rw ip=%s::192.168.127.1:255.255.255.0::eth0:off:::", vmIP),
 		Drives: []models.Drive{{
 			DriveID:      firecracker.String("rootfs"),
 			IsRootDevice: firecracker.Bool(true),
@@ -414,14 +405,6 @@ func (vm *VMManager) ResumeFromSnapshot(instanceID string, plugin *Plugin) error
 			StaticConfiguration: &firecracker.StaticNetworkConfiguration{
 				MacAddress:  fmt.Sprintf("02:FC:00:00:%02x:%02x", byte(vm.nextIP), byte(vm.nextIP+1)),
 				HostDevName: tapName,
-				IPConfiguration: &firecracker.IPConfiguration{
-					IPAddr: net.IPNet{
-						IP:   net.ParseIP(vmIP),
-						Mask: net.IPMask(net.ParseIP("255.255.255.0").To4()),
-					},
-					Gateway: net.ParseIP("192.168.127.1"),
-					IfName:  "eth0",
-				},
 			},
 		}},
 	}
