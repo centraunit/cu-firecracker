@@ -568,6 +568,7 @@ func (cms *CMS) handleUploadPlugin(w http.ResponseWriter, r *http.Request) {
 		existingPlugin.Description = metadata.Description
 		existingPlugin.Version = metadata.Version
 		existingPlugin.Author = metadata.Author
+		existingPlugin.Runtime = metadata.Runtime
 		existingPlugin.RootFSPath = rootfsPath
 		existingPlugin.UpdatedAt = time.Now()
 		existingPlugin.Status = "uploaded" // Will be set to ready after health check
@@ -615,6 +616,7 @@ func (cms *CMS) handleUploadPlugin(w http.ResponseWriter, r *http.Request) {
 		Description: metadata.Description,
 		Version:     metadata.Version,
 		Author:      metadata.Author,
+		Runtime:     metadata.Runtime,
 		RootFSPath:  rootfsPath,
 		KernelPath:  cms.vmManager.kernelPath,
 		CreatedAt:   time.Now(),
@@ -1302,6 +1304,8 @@ func (cms *CMS) parsePluginJson(jsonPath string) (*Plugin, error) {
 		return nil, fmt.Errorf("failed to read plugin.json: %v", err)
 	}
 
+	logger.WithFields(logrus.Fields{"path": jsonPath, "data": string(data)}).Debug("Reading plugin.json content")
+
 	var metadata struct {
 		Slug        string                  `json:"slug"`
 		Name        string                  `json:"name"`
@@ -1316,6 +1320,13 @@ func (cms *CMS) parsePluginJson(jsonPath string) (*Plugin, error) {
 		return nil, fmt.Errorf("failed to parse plugin.json: %v", err)
 	}
 
+	logger.WithFields(logrus.Fields{
+		"slug":          metadata.Slug,
+		"name":          metadata.Name,
+		"runtime":       metadata.Runtime,
+		"runtime_empty": metadata.Runtime == "",
+	}).Debug("Parsed plugin metadata")
+
 	// Validate required fields
 	if metadata.Slug == "" {
 		return nil, fmt.Errorf("plugin slug is required")
@@ -1327,7 +1338,7 @@ func (cms *CMS) parsePluginJson(jsonPath string) (*Plugin, error) {
 		return nil, fmt.Errorf("plugin version is required")
 	}
 
-	return &Plugin{
+	plugin := &Plugin{
 		Slug:        metadata.Slug,
 		Name:        metadata.Name,
 		Description: metadata.Description,
@@ -1335,7 +1346,15 @@ func (cms *CMS) parsePluginJson(jsonPath string) (*Plugin, error) {
 		Author:      metadata.Author,
 		Runtime:     metadata.Runtime,
 		Actions:     metadata.Actions,
-	}, nil
+	}
+
+	logger.WithFields(logrus.Fields{
+		"plugin_slug":          plugin.Slug,
+		"plugin_runtime":       plugin.Runtime,
+		"plugin_runtime_empty": plugin.Runtime == "",
+	}).Debug("Created plugin object")
+
+	return plugin, nil
 }
 
 // copyFile copies a file from src to dst
