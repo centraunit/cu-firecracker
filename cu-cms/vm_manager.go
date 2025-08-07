@@ -158,9 +158,15 @@ func (vm *VMManager) setupNetworkInterface(tapName string) error {
 	return nil
 }
 
-// StartVM starts a new Firecracker VM
+// StartVM starts a new Firecracker microVM for a plugin
 func (vm *VMManager) StartVM(instanceID string, plugin *Plugin) error {
 	logger.WithFields(logrus.Fields{"instance_id": instanceID, "plugin_slug": plugin.Slug}).Info("Starting VM")
+
+	// Clean up any existing socket file before starting
+	socketPath := fmt.Sprintf("/tmp/firecracker-%s.sock", instanceID)
+	if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) {
+		logger.WithFields(logrus.Fields{"instance_id": instanceID, "socket": socketPath}).Debug("Failed to remove existing socket, continuing anyway")
+	}
 
 	// Allocate IP for this instance
 	vmIP, err := vm.allocateIP(instanceID)
@@ -182,7 +188,7 @@ func (vm *VMManager) StartVM(instanceID string, plugin *Plugin) error {
 
 	// Create machine configuration
 	cfg := firecracker.Config{
-		SocketPath:      fmt.Sprintf("/tmp/firecracker-%s.sock", instanceID),
+		SocketPath:      socketPath,
 		KernelImagePath: vm.kernelPath,
 		KernelArgs:      fmt.Sprintf("console=ttyS0 reboot=k panic=1 random.trust_cpu=on rootfstype=ext4 rw init=/sbin/init ip=%s::192.168.127.1:255.255.255.0::eth0:off:::", vmIP),
 		Drives: []models.Drive{{
@@ -211,12 +217,16 @@ func (vm *VMManager) StartVM(instanceID string, plugin *Plugin) error {
 	)
 	if err != nil {
 		vm.deallocateIP(instanceID)
+		vm.cleanupNetworkInterface(tapName)
+		os.Remove(socketPath) // Clean up socket on failure
 		return fmt.Errorf("failed to create machine: %v", err)
 	}
 
 	// Start the machine
 	if err := machine.Start(context.Background()); err != nil {
 		vm.deallocateIP(instanceID)
+		vm.cleanupNetworkInterface(tapName)
+		os.Remove(socketPath) // Clean up socket on failure
 		return fmt.Errorf("failed to start machine: %v", err)
 	}
 
@@ -372,6 +382,12 @@ func (vm *VMManager) ResumeFromSnapshot(instanceID string, plugin *Plugin) error
 		return fmt.Errorf("memory file not found: %s", memPath)
 	}
 
+	// Clean up any existing socket file before starting
+	socketPath := fmt.Sprintf("/tmp/firecracker-%s.sock", instanceID)
+	if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) {
+		logger.WithFields(logrus.Fields{"instance_id": instanceID, "socket": socketPath}).Debug("Failed to remove existing socket, continuing anyway")
+	}
+
 	// Allocate IP for this instance
 	vmIP, err := vm.allocateIP(instanceID)
 	if err != nil {
@@ -392,7 +408,7 @@ func (vm *VMManager) ResumeFromSnapshot(instanceID string, plugin *Plugin) error
 
 	// Create machine configuration with snapshot
 	cfg := firecracker.Config{
-		SocketPath:      fmt.Sprintf("/tmp/firecracker-%s.sock", instanceID),
+		SocketPath:      socketPath,
 		KernelImagePath: vm.kernelPath,
 		KernelArgs:      fmt.Sprintf("console=ttyS0 reboot=k panic=1 random.trust_cpu=on rootfstype=ext4 rw ip=%s::192.168.127.1:255.255.255.0::eth0:off:::", vmIP),
 		Drives: []models.Drive{{
@@ -422,12 +438,16 @@ func (vm *VMManager) ResumeFromSnapshot(instanceID string, plugin *Plugin) error
 	)
 	if err != nil {
 		vm.deallocateIP(instanceID)
+		vm.cleanupNetworkInterface(tapName)
+		os.Remove(socketPath) // Clean up socket on failure
 		return fmt.Errorf("failed to create machine with snapshot: %v", err)
 	}
 
 	// Start the machine (will resume from snapshot)
 	if err := machine.Start(context.Background()); err != nil {
 		vm.deallocateIP(instanceID)
+		vm.cleanupNetworkInterface(tapName)
+		os.Remove(socketPath) // Clean up socket on failure
 		return fmt.Errorf("failed to resume machine from snapshot: %v", err)
 	}
 
@@ -578,6 +598,17 @@ func (vm *VMManager) generateTapName(instanceID string) string {
 	hash := md5.Sum([]byte(instanceID))
 	shortHash := hex.EncodeToString(hash[:4]) // 8 characters
 	return fmt.Sprintf("fc-%s", shortHash)
+}
+
+// cleanupNetworkInterface deletes the tap interface if it exists
+func (vm *VMManager) cleanupNetworkInterface(tapName string) {
+	logger.WithFields(logrus.Fields{"tap": tapName}).Debug("Cleaning up tap interface")
+	cmd := exec.Command("ip", "link", "delete", tapName)
+	if err := cmd.Run(); err != nil {
+		logger.WithFields(logrus.Fields{"tap": tapName, "error": err}).Debug("Failed to clean up tap interface")
+	} else {
+		logger.WithFields(logrus.Fields{"tap": tapName}).Debug("Cleaned up tap interface")
+	}
 }
 
 // Helper functions for pointer conversion

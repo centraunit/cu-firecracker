@@ -27,10 +27,11 @@ import (
 // Configuration constants
 const (
 	DefaultPort            = "80"
-	DefaultHTTPTimeout     = 1 * time.Second // Fast timeout for instant execution
+	DefaultHTTPTimeout     = 5 * time.Second // Increased timeout for plugin startup after snapshot resume
 	DefaultHealthRetries   = 15
 	DefaultHealthDelay     = 1 * time.Second
 	MaxPluginExecutionTime = 30 * time.Second
+	VMReadyWaitTime        = 3 * time.Second
 	MaxConcurrentActions   = 10 // Limit concurrent plugin executions
 )
 
@@ -1188,13 +1189,6 @@ func (cms *CMS) executePluginAction(plugin *Plugin, action PluginAction, hook st
 		return result, err
 	}
 
-	// Clean up VM after execution
-	defer func() {
-		if stopErr := cms.vmManager.StopVM(instanceID); stopErr != nil {
-			logger.WithFields(logrus.Fields{"instance_id": instanceID, "error": stopErr}).Error("Failed to stop VM after action execution")
-		}
-	}()
-
 	// Wait for plugin to be ready with health check
 	vmIP, exists := cms.vmManager.getVMIP(instanceID)
 	if !exists {
@@ -1212,6 +1206,12 @@ func (cms *CMS) executePluginAction(plugin *Plugin, action PluginAction, hook st
 	// Execute action via HTTP with timeout
 	actionURL := fmt.Sprintf("http://%s:80%s", vmIP, action.Endpoint)
 	response, err := cms.makeHTTPRequestWithTimeout(action.Method, actionURL, pluginRequest, DefaultHTTPTimeout)
+
+	// Clean up VM after HTTP response is received
+	if stopErr := cms.vmManager.StopVM(instanceID); stopErr != nil {
+		logger.WithFields(logrus.Fields{"instance_id": instanceID, "error": stopErr}).Error("Failed to stop VM after action execution")
+	}
+
 	if err != nil {
 		result.Error = fmt.Sprintf("failed to execute action: %v", err)
 		result.ExecutionTime = time.Since(start)
