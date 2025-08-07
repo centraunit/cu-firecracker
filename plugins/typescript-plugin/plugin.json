@@ -1,6 +1,21 @@
 {
+  "slug": "typescript-cms",
   "name": "typescript-cms-plugin",
   "version": "1.0.0",
   "port": 8080,
-  "description": "A TypeScript CMS plugin example"
+  "description": "A TypeScript CMS plugin example",
+  "author": "CU Team",
+  "runtime": "typescript",
+  "actions": {
+    "test_action": {
+      "name": "Test Action Handler",
+      "description": "Simple test action",
+      "hooks": ["test.event"],
+      "method": "POST",
+      "endpoint": "/actions/test",
+      "priority": 10
+    }
+  },
+  "health_endpoint": "/health",
+  "discovery_endpoint": "/actions"
 } 

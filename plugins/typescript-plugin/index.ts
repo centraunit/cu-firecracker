@@ -139,6 +139,51 @@ function updateAnalytics(): void {
 // Load data on startup
 loadData();
 
+// Health check endpoint
+app.get('/health', (req: Request, res: Response) => {
+    res.json({
+        status: 'healthy',
+        service: 'typescript-cms-plugin',
+        version: '1.0.0',
+        timestamp: new Date().toISOString(),
+        uptime: process.uptime()
+    });
+});
+
+// Actions discovery endpoint
+app.get('/actions', (req: Request, res: Response) => {
+    res.json({
+        success: true,
+        actions: {
+            test_action: {
+                name: "Test Action Handler",
+                description: "Simple test action",
+                hooks: ["test.event"],
+                method: "POST",
+                endpoint: "/actions/test",
+                priority: 10
+            }
+        },
+        service: 'typescript-cms-plugin',
+        timestamp: new Date().toISOString()
+    });
+});
+
+// Test action endpoint
+app.post('/actions/test', (req: Request, res: Response) => {
+    const { data } = req.body;
+    
+    console.log('Test action executed with data:', data);
+    
+    res.json({
+        success: true,
+        action: 'test_action',
+        message: 'Test action executed successfully',
+        data: data || {},
+        timestamp: new Date().toISOString()
+    });
+});
+
 // Start the HTTP server
 app.listen(port, () => {
     console.log(`CMS Plugin HTTP server listening on port ${port}`);

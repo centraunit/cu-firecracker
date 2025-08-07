@@ -118,8 +118,8 @@ func (vm *VMManager) setupNetworkInterface(tapName string) error {
 	logger.WithFields(logrus.Fields{"bridge": bridgeName, "ip": "192.168.127.1/24"}).Debug("Adding IP to bridge")
 	if output, err := exec.Command("ip", "addr", "add", "192.168.127.1/24", "dev", bridgeName).CombinedOutput(); err != nil {
 		// Ignore error if IP already exists
-		if !strings.Contains(string(output), "File exists") {
-			return fmt.Errorf("failed to add IP to bridge: %v, output: %s", err, string(output))
+		if !strings.Contains(string(output), "File exists") && !strings.Contains(string(output), "Address already assigned") {
+			return fmt.Errorf("failed to add IP to bridge: exit status %v, output: %s", err, string(output))
 		}
 	}
 
@@ -184,7 +184,7 @@ func (vm *VMManager) StartVM(instanceID string, plugin *Plugin) error {
 	cfg := firecracker.Config{
 		SocketPath:      fmt.Sprintf("/tmp/firecracker-%s.sock", instanceID),
 		KernelImagePath: vm.kernelPath,
-		KernelArgs:      fmt.Sprintf("console=ttyS0 noapic reboot=k panic=1 pci=off random.trust_cpu=on rootfstype=ext4 rw init=/sbin/init ip=%s::192.168.127.1:255.255.255.0::eth0:off:::", vmIP),
+		KernelArgs:      fmt.Sprintf("console=ttyS0 reboot=k panic=1 random.trust_cpu=on rootfstype=ext4 rw init=/sbin/init ip=%s::192.168.127.1:255.255.255.0::eth0:off:::", vmIP),
 		Drives: []models.Drive{{
 			DriveID:      firecracker.String("rootfs"),
 			IsRootDevice: firecracker.Bool(true),
@@ -197,7 +197,7 @@ func (vm *VMManager) StartVM(instanceID string, plugin *Plugin) error {
 		},
 		NetworkInterfaces: []firecracker.NetworkInterface{{
 			StaticConfiguration: &firecracker.StaticNetworkConfiguration{
-				MacAddress:  fmt.Sprintf("02:FC:00:00:%02x:%02x", byte(vm.nextIP), byte(vm.nextIP+1)),
+				MacAddress:  "02:FC:00:00:03:04",
 				HostDevName: tapName,
 			},
 		}},
@@ -270,7 +270,7 @@ func (vm *VMManager) StopVM(instanceID string) error {
 	}
 
 	// Clean up tap interface
-	tapName := fmt.Sprintf("tap-%s", instanceID[len(instanceID)-8:])
+	tapName := vm.generateTapName(instanceID)
 	cmd := exec.Command("ip", "link", "delete", tapName)
 	if err := cmd.Run(); err != nil {
 		logger.WithFields(logrus.Fields{"instance_id": instanceID, "tap": tapName, "error": err}).Debug("Failed to clean up tap interface")
@@ -390,7 +390,7 @@ func (vm *VMManager) ResumeFromSnapshot(instanceID string, plugin *Plugin) error
 	cfg := firecracker.Config{
 		SocketPath:      fmt.Sprintf("/tmp/firecracker-%s.sock", instanceID),
 		KernelImagePath: vm.kernelPath,
-		KernelArgs:      fmt.Sprintf("console=ttyS0 noapic reboot=k panic=1 pci=off random.trust_cpu=on rootfstype=ext4 rw ip=%s::192.168.127.1:255.255.255.0::eth0:off:::", vmIP),
+		KernelArgs:      fmt.Sprintf("console=ttyS0 reboot=k panic=1 random.trust_cpu=on rootfstype=ext4 rw ip=%s::192.168.127.1:255.255.255.0::eth0:off:::", vmIP),
 		Drives: []models.Drive{{
 			DriveID:      firecracker.String("rootfs"),
 			IsRootDevice: firecracker.Bool(true),
