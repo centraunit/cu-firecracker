@@ -360,9 +360,10 @@ func (vm *VMManager) GetVMIP(instanceID string) (string, error) {
 func (vm *VMManager) ResumeFromSnapshot(instanceID string, plugin *Plugin) error {
 	logger.WithFields(logrus.Fields{"instance_id": instanceID, "plugin_slug": plugin.Slug}).Info("Resuming VM from snapshot")
 
-	// Check if snapshot files exist
-	snapshotPath := filepath.Join(vm.snapshotDir, plugin.Slug+".snapshot")
-	memPath := filepath.Join(vm.snapshotDir, plugin.Slug+".mem")
+	// Check if snapshot files exist (use same paths as CreateSnapshot generates)
+	basePath := vm.GetSnapshotPath(plugin.Slug)
+	snapshotPath := basePath + ".snapshot"
+	memPath := basePath + ".mem"
 
 	if _, err := os.Stat(snapshotPath); os.IsNotExist(err) {
 		return fmt.Errorf("snapshot file not found: %s", snapshotPath)
@@ -529,7 +530,7 @@ func (vm *VMManager) CreateSnapshot(instanceID string, snapshotPath string) erro
 		}
 	}()
 
-	// Create snapshot with logger
+	// Create snapshot with logger (no additional options available in current SDK version)
 	if err := machine.CreateSnapshot(context.Background(), memFilePath, snapshotFilePath); err != nil {
 		return fmt.Errorf("failed to create snapshot: %v", err)
 	}
@@ -538,15 +539,16 @@ func (vm *VMManager) CreateSnapshot(instanceID string, snapshotPath string) erro
 	return nil
 }
 
-// GetSnapshotPath returns the standard snapshot path for a plugin slug
+// GetSnapshotPath returns the standard snapshot path for a plugin slug (base path without extension)
 func (vm *VMManager) GetSnapshotPath(pluginSlug string) string {
-	return filepath.Join(vm.snapshotDir, pluginSlug+".snapshot")
+	return filepath.Join(vm.snapshotDir, pluginSlug)
 }
 
 // HasSnapshot checks if a snapshot exists for the given plugin slug
 func (vm *VMManager) HasSnapshot(pluginSlug string) bool {
-	snapshotPath := vm.GetSnapshotPath(pluginSlug)
-	memPath := snapshotPath + ".mem"
+	basePath := vm.GetSnapshotPath(pluginSlug)
+	snapshotPath := basePath + ".snapshot"
+	memPath := basePath + ".mem"
 
 	// Both files must exist for a valid snapshot
 	_, err1 := os.Stat(snapshotPath)
@@ -557,8 +559,9 @@ func (vm *VMManager) HasSnapshot(pluginSlug string) bool {
 
 // DeleteSnapshot removes snapshot files for a plugin
 func (vm *VMManager) DeleteSnapshot(pluginSlug string) error {
-	snapshotPath := vm.GetSnapshotPath(pluginSlug)
-	memPath := snapshotPath + ".mem"
+	basePath := vm.GetSnapshotPath(pluginSlug)
+	snapshotPath := basePath + ".snapshot"
+	memPath := basePath + ".mem"
 
 	// Remove both snapshot files (ignore errors if files don't exist)
 	os.Remove(snapshotPath)

@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -26,13 +27,11 @@ import (
 // Configuration constants
 const (
 	DefaultPort            = "80"
-	DefaultHTTPTimeout     = 5 * time.Second // Reduced from 10s
+	DefaultHTTPTimeout     = 1 * time.Second // Fast timeout for instant execution
 	DefaultHealthRetries   = 15
 	DefaultHealthDelay     = 1 * time.Second
 	MaxPluginExecutionTime = 30 * time.Second
-	VMReadyWaitTime        = 3 * time.Second
-	SnapshotResumeWait     = 200 * time.Millisecond // User's max requirement
-	MaxConcurrentActions   = 10                     // Limit concurrent plugin executions
+	MaxConcurrentActions   = 10 // Limit concurrent plugin executions
 )
 
 // Global logger and HTTP client pool
@@ -1074,6 +1073,11 @@ func (cms *CMS) handleExecuteAction(w http.ResponseWriter, r *http.Request) {
 		"plugin_count": len(pluginActions),
 	}).Info("Executing action across plugins")
 
+	// Sort plugins by priority (higher priority first)
+	sort.Slice(pluginActions, func(i, j int) bool {
+		return pluginActions[i].Action.Priority > pluginActions[j].Action.Priority
+	})
+
 	// Execute action on all plugins that hook to it
 	results := make([]ActionExecutionResult, 0, len(pluginActions))
 
@@ -1191,14 +1195,7 @@ func (cms *CMS) executePluginAction(plugin *Plugin, action PluginAction, hook st
 		}
 	}()
 
-	// Optimized wait time based on snapshot usage
-	if cms.vmManager.HasSnapshot(plugin.Slug) {
-		time.Sleep(SnapshotResumeWait) // 200ms max as per user requirement
-	} else {
-		time.Sleep(1 * time.Second) // Regular startup needs more time
-	}
-
-	// Get VM IP
+	// Wait for plugin to be ready with health check
 	vmIP, exists := cms.vmManager.getVMIP(instanceID)
 	if !exists {
 		result.Error = fmt.Sprintf("VM IP not found for instance %s", instanceID)

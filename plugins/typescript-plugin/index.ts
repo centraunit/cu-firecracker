@@ -71,7 +71,7 @@ function writeData(data: CMSData): void {
 
 // Health check endpoint
 app.get('/health', (req: Request, res: Response) => {
-    res.status(200).send('OK');
+    res.status(200).json({ status: 'healthy' });
 });
 
 // Discovery endpoint
