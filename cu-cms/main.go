@@ -25,7 +25,7 @@ import (
 
 // Configuration constants
 const (
-	DefaultPort            = "8080"
+	DefaultPort            = "80"
 	DefaultHTTPTimeout     = 5 * time.Second // Reduced from 10s
 	DefaultHealthRetries   = 15
 	DefaultHealthDelay     = 1 * time.Second
