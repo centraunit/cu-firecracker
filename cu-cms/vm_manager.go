@@ -231,20 +231,21 @@ func (vm *VMManager) StartVM(instanceID string, plugin *Plugin) error {
 
 // StopVM stops a Firecracker microVM
 func (vm *VMManager) StopVM(instanceID string) error {
-	vm.mutex.Lock()
-	defer vm.mutex.Unlock()
-
 	logger.WithFields(logrus.Fields{"instance_id": instanceID}).Info("Stopping VM")
 
+	// Lock only to access the instances map
+	vm.mutex.Lock()
 	machine, exists := vm.instances[instanceID]
 	if !exists {
+		vm.mutex.Unlock()
 		logger.WithFields(logrus.Fields{"instance_id": instanceID}).Warn("VM instance not found for stopping")
 		return fmt.Errorf("VM instance %s not found", instanceID)
 	}
+	vm.mutex.Unlock()
 
 	logger.WithFields(logrus.Fields{"instance_id": instanceID}).Debug("Shutting down Firecracker machine")
 
-	// Shutdown the machine with timeout
+	// Shutdown the machine with timeout (no mutex needed)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -255,13 +256,15 @@ func (vm *VMManager) StopVM(instanceID string) error {
 
 	logger.WithFields(logrus.Fields{"instance_id": instanceID}).Info("VM shutdown completed")
 
-	// Clean up
+	// Lock only for cleanup operations that modify shared state
+	vm.mutex.Lock()
 	delete(vm.instances, instanceID)
+	vm.mutex.Unlock()
 
-	// Deallocate IP address
+	// Deallocate IP address (has its own mutex)
 	vm.deallocateIP(instanceID)
 
-	// Clean up temporary directory
+	// Clean up temporary directory (no mutex needed)
 	vmDir := filepath.Join("/tmp", "firecracker-"+instanceID)
 	if err := os.RemoveAll(vmDir); err != nil {
 		logger.WithFields(logrus.Fields{"instance_id": instanceID, "path": vmDir, "error": err}).Error("Failed to clean up VM directory")
@@ -269,7 +272,7 @@ func (vm *VMManager) StopVM(instanceID string) error {
 		logger.WithFields(logrus.Fields{"instance_id": instanceID, "path": vmDir}).Debug("Cleaned up VM directory")
 	}
 
-	// Clean up tap interface
+	// Clean up tap interface (no mutex needed)
 	tapName := vm.generateTapName(instanceID)
 	cmd := exec.Command("ip", "link", "delete", tapName)
 	if err := cmd.Run(); err != nil {
