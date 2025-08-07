@@ -1,36 +1,34 @@
 {
-  "slug": "python-performance",
-  "name": "Python Performance Plugin",
+  "slug": "python-analytics",
+  "name": "Python Analytics Plugin",
   "version": "1.0.0",
-  "description": "High-performance Python plugin with e-commerce actions",
+  "description": "Advanced analytics and data processing plugin",
   "author": "CU Team",
   "runtime": "python",
   "actions": {
-    "product_created": {
-      "name": "Product Created Handler",
-      "description": "Handles product creation events",
-      "hooks": ["product.created", "product.updated"],
+    "data_analysis": {
+      "name": "Data Analysis Handler",
+      "description": "Processes and analyzes data sets",
+      "hooks": ["data.analyze", "data.process"],
       "method": "POST",
-      "endpoint": "/actions/product",
+      "endpoint": "/actions/analyze",
       "priority": 10
     },
-    "order_processing": {
-      "name": "Order Processing Handler", 
-      "description": "Handles order processing events",
-      "hooks": ["order.created", "order.updated", "order.paid"],
+    "report_generation": {
+      "name": "Report Generator",
+      "description": "Generates analytics reports",
+      "hooks": ["report.generate", "report.export"],
       "method": "POST",
-      "endpoint": "/actions/order",
+      "endpoint": "/actions/report",
       "priority": 5
     },
-    "analytics_calculation": {
-      "name": "Analytics Calculator",
-      "description": "Calculates analytics and metrics",
-      "hooks": ["analytics.calculate", "report.generate"],
-      "method": "POST", 
-      "endpoint": "/actions/analytics",
-      "priority": 1
+    "data_visualization": {
+      "name": "Data Visualizer",
+      "description": "Creates charts and graphs from data",
+      "hooks": ["data.visualize", "chart.create"],
+      "method": "POST",
+      "endpoint": "/actions/visualize",
+      "priority": 8
     }
-  },
-  "health_endpoint": "/health",
-  "discovery_endpoint": "/actions"
+  }
 } 

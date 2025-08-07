@@ -71,6 +71,7 @@ type Plugin struct {
 	Description string                  `json:"description"`
 	Version     string                  `json:"version"`
 	Author      string                  `json:"author"`
+	Runtime     string                  `json:"runtime"` // Runtime environment (python, typescript, php, etc.)
 	RootFSPath  string                  `json:"rootfs_path"`
 	KernelPath  string                  `json:"kernel_path"`
 	CreatedAt   time.Time               `json:"created_at"`
@@ -1307,6 +1308,7 @@ func (cms *CMS) parsePluginJson(jsonPath string) (*Plugin, error) {
 		Description string                  `json:"description"`
 		Version     string                  `json:"version"`
 		Author      string                  `json:"author"`
+		Runtime     string                  `json:"runtime"`
 		Actions     map[string]PluginAction `json:"actions"`
 	}
 
@@ -1331,6 +1333,7 @@ func (cms *CMS) parsePluginJson(jsonPath string) (*Plugin, error) {
 		Description: metadata.Description,
 		Version:     metadata.Version,
 		Author:      metadata.Author,
+		Runtime:     metadata.Runtime,
 		Actions:     metadata.Actions,
 	}, nil
 }

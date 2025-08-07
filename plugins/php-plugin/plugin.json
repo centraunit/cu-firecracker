@@ -1,0 +1,34 @@
+{
+  "slug": "php-content-manager",
+  "name": "PHP Content Manager Plugin",
+  "version": "1.0.0",
+  "description": "Comprehensive content management and user operations",
+  "author": "CU Team",
+  "runtime": "php",
+  "actions": {
+    "content_operations": {
+      "name": "Content Operations",
+      "description": "Creates, publishes and manages content",
+      "hooks": ["content.create", "content.publish", "content.manage"],
+      "method": "POST",
+      "endpoint": "/actions/content",
+      "priority": 5
+    },
+    "user_management": {
+      "name": "User Management",
+      "description": "Handles user authentication and registration",
+      "hooks": ["user.login", "user.logout", "user.register"],
+      "method": "POST",
+      "endpoint": "/actions/auth",
+      "priority": 1
+    },
+    "cache_operations": {
+      "name": "Cache Operations",
+      "description": "Manages content caching and optimization",
+      "hooks": ["cache.clear", "cache.warm", "cache.optimize"],
+      "method": "POST",
+      "endpoint": "/actions/cache",
+      "priority": 8
+    }
+  }
+} 

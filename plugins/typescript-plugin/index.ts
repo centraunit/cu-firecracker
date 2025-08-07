@@ -13,334 +13,248 @@ app.use(express.json());
 const DATA_FILE = '/tmp/cms_data.json';
 
 // Interface definitions
-interface Customer {
+interface ContentItem {
     id: number;
-    name: string;
-    email: string;
-    status: 'active' | 'inactive';
-    createdAt: string;
-    updatedAt: string;
-    phone?: string;
-    company?: string;
-    tags?: string[];
+    title: string;
+    content: string;
+    status: 'draft' | 'published';
+    seo_score?: number;
+    created_at: string;
+    updated_at?: string;
 }
 
-interface Analytics {
-    totalCustomers: number;
-    activeCustomers: number;
-    inactiveCustomers: number;
-    newCustomersThisMonth: number;
-    lastUpdated: string;
-    averageCustomerAge: number;
+interface MediaItem {
+    id: number;
+    filename: string;
+    type: string;
+    size: number;
+    optimized: boolean;
+    url: string;
+    created_at: string;
 }
 
 interface CMSData {
-    customers: Customer[];
-    analytics: Analytics;
-    lastCustomerId: number;
+    content: ContentItem[];
+    media: MediaItem[];
+    last_updated: string;
 }
 
-// Initialize data store
-let cmsData: CMSData = {
-    customers: [
-        { 
-            id: 1, 
-            name: 'John Doe', 
-            email: 'john@example.com', 
-            status: 'active',
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
-            phone: '+1-555-0101',
-            company: 'Tech Corp',
-            tags: ['vip', 'enterprise']
-        },
-        { 
-            id: 2, 
-            name: 'Jane Smith', 
-            email: 'jane@example.com', 
-            status: 'active',
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
-            phone: '+1-555-0102',
-            company: 'Startup Inc',
-            tags: ['startup']
-        },
-        { 
-            id: 3, 
-            name: 'Bob Johnson', 
-            email: 'bob@example.com', 
-            status: 'inactive',
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
-            phone: '+1-555-0103',
-            tags: ['former']
-        }
-    ],
-    analytics: {
-    totalCustomers: 3,
-    activeCustomers: 2,
-    inactiveCustomers: 1,
-        newCustomersThisMonth: 0,
-        lastUpdated: new Date().toISOString(),
-        averageCustomerAge: 0
-    },
-    lastCustomerId: 3
-};
-
-// Data persistence functions
-function saveData(): void {
-    try {
-        fs.writeFileSync(DATA_FILE, JSON.stringify(cmsData, null, 2));
-    } catch (error) {
-        console.error('Failed to save data:', error);
-    }
-}
-
-function loadData(): void {
+// Helper function to read data
+function readData(): CMSData {
     try {
         if (fs.existsSync(DATA_FILE)) {
             const data = fs.readFileSync(DATA_FILE, 'utf8');
-            cmsData = JSON.parse(data);
-            updateAnalytics();
+            return JSON.parse(data);
         }
     } catch (error) {
-        console.error('Failed to load data:', error);
+        console.error('Error reading data:', error);
+    }
+    
+    return {
+        content: [
+            { id: 1, title: 'Welcome', content: 'Welcome to TypeScript CMS!', status: 'published', created_at: new Date().toISOString() }
+        ],
+        media: [],
+        last_updated: new Date().toISOString()
+    };
+}
+
+// Helper function to write data
+function writeData(data: CMSData): void {
+    try {
+        data.last_updated = new Date().toISOString();
+        fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+    } catch (error) {
+        console.error('Error writing data:', error);
     }
 }
-
-function updateAnalytics(): void {
-    const now = new Date();
-    const thisMonth = now.getMonth();
-    const thisYear = now.getFullYear();
-    
-    cmsData.analytics.totalCustomers = cmsData.customers.length;
-    cmsData.analytics.activeCustomers = cmsData.customers.filter(c => c.status === 'active').length;
-    cmsData.analytics.inactiveCustomers = cmsData.customers.filter(c => c.status === 'inactive').length;
-    cmsData.analytics.lastUpdated = now.toISOString();
-    
-    // Calculate new customers this month
-    cmsData.analytics.newCustomersThisMonth = cmsData.customers.filter(c => {
-        const created = new Date(c.createdAt);
-        return created.getMonth() === thisMonth && created.getFullYear() === thisYear;
-    }).length;
-    
-    // Calculate average customer age (days since creation)
-    const totalAge = cmsData.customers.reduce((sum, customer) => {
-        const created = new Date(customer.createdAt);
-        const ageInDays = Math.floor((now.getTime() - created.getTime()) / (1000 * 60 * 60 * 24));
-        return sum + ageInDays;
-    }, 0);
-    
-    cmsData.analytics.averageCustomerAge = cmsData.customers.length > 0 
-        ? Math.round(totalAge / cmsData.customers.length) 
-        : 0;
-}
-
-// Load data on startup
-loadData();
 
 // Health check endpoint
 app.get('/health', (req: Request, res: Response) => {
-    res.json({
-        status: 'healthy',
-        service: 'typescript-cms-plugin',
-        version: '1.0.0',
-        timestamp: new Date().toISOString(),
-        uptime: process.uptime()
-    });
+    res.status(200).send('OK');
 });
 
-// Actions discovery endpoint
+// Discovery endpoint
 app.get('/actions', (req: Request, res: Response) => {
-    res.json({
-        success: true,
-        actions: {
-            test_action: {
-                name: "Test Action Handler",
-                description: "Simple test action",
-                hooks: ["test.event"],
-                method: "POST",
-                endpoint: "/actions/test",
-                priority: 10
-            }
+    res.status(200).json({
+        "content_management": {
+            "name": "Content Manager",
+            "description": "Manages CMS content and pages",
+            "hooks": ["content.create", "content.update", "content.delete"],
+            "method": "POST",
+            "endpoint": "/actions/content",
+            "priority": 10
         },
-        service: 'typescript-cms-plugin',
-        timestamp: new Date().toISOString()
+        "media_processing": {
+            "name": "Media Processor",
+            "description": "Handles media uploads and processing",
+            "hooks": ["media.upload", "media.process", "media.optimize"],
+            "method": "POST",
+            "endpoint": "/actions/media",
+            "priority": 7
+        },
+        "seo_optimization": {
+            "name": "SEO Optimizer",
+            "description": "Optimizes content for search engines",
+            "hooks": ["seo.analyze", "seo.optimize"],
+            "method": "POST",
+            "endpoint": "/actions/seo",
+            "priority": 5
+        }
     });
 });
 
-// Test action endpoint
-app.post('/actions/test', (req: Request, res: Response) => {
-    const { data } = req.body;
-    
-    console.log('Test action executed with data:', data);
-    
-    res.json({
-        success: true,
-        action: 'test_action',
-        message: 'Test action executed successfully',
-        data: data || {},
-        timestamp: new Date().toISOString()
-    });
-});
+// Content management endpoint
+app.post('/actions/content', (req: Request, res: Response) => {
+    const { action, ...params } = req.body;
+    const data = readData();
 
-// Start the HTTP server
-app.listen(port, () => {
-    console.log(`CMS Plugin HTTP server listening on port ${port}`);
-});
-
-// Handle incoming requests
-app.get('/customers', (req: Request, res: Response) => {
-    res.json({
-        success: true,
-        action: 'get_customers',
-        data: cmsData.customers,
-        count: cmsData.customers.length,
-        timestamp: new Date().toISOString()
-    });
-});
-
-app.post('/customers', (req: Request, res: Response) => {
-    const { name, email, status, phone, company, tags } = req.body;
-
-    if (!name || !email) {
-        res.status(400).json({
-            success: false,
-            error: 'Name and email are required for add_customer action'
-        });
-        return;
-    }
-
-    if (cmsData.customers.find(c => c.email === email)) {
-        res.status(409).json({
-            success: false,
-            error: 'Customer with this email already exists'
-        });
-        return;
-    }
-
-    const now = new Date().toISOString();
-    const newCustomer: Customer = {
-        id: ++cmsData.lastCustomerId,
-        name: name,
-        email: email,
-        status: status || 'active',
-        createdAt: now,
-        updatedAt: now,
-        phone: phone,
-        company: company,
-        tags: tags || []
-    };
-
-    cmsData.customers.push(newCustomer);
-    updateAnalytics();
-    saveData();
-
-    res.json({
-        success: true,
-        action: 'add_customer',
-        data: newCustomer,
-        message: 'Customer added successfully',
-        timestamp: now
-    });
-});
-
-app.get('/analytics', (req: Request, res: Response) => {
-    res.json({
-        success: true,
-        action: 'get_analytics',
-        data: cmsData.analytics,
-        timestamp: new Date().toISOString()
-    });
-}); 
-
-// Main execute endpoint that the CMS calls
-app.post('/execute', (req: Request, res: Response) => {
-    const { action, data } = req.body;
-    
-    console.log(`Executing action: ${action}`, data);
-    
     try {
         switch (action) {
-            case 'get_customers':
-                res.json({
-                    success: true,
-                    action: 'get_customers',
-                    data: cmsData.customers,
-                    count: cmsData.customers.length,
-                    timestamp: new Date().toISOString()
-                });
-                break;
-                
-            case 'add_customer':
-                if (!data || !data.name || !data.email) {
-                    res.status(400).json({
-                        success: false,
-                        error: 'Name and email are required for add_customer action'
-                    });
-                    return;
-                }
-                
-                if (cmsData.customers.find(c => c.email === data.email)) {
-                    res.status(409).json({
-                        success: false,
-                        error: 'Customer with this email already exists'
-                    });
-                    return;
-                }
-                
-                const now = new Date().toISOString();
-                const newCustomer: Customer = {
-                    id: ++cmsData.lastCustomerId,
-                    name: data.name,
-                    email: data.email,
-                    status: data.status || 'active',
-                    createdAt: now,
-                    updatedAt: now,
-                    phone: data.phone,
-                    company: data.company,
-                    tags: data.tags || []
+            case 'create':
+                const newContent: ContentItem = {
+                    id: data.content.length + 1,
+                    title: params.title || 'Untitled',
+                    content: params.content || '',
+                    status: params.status || 'draft',
+                    created_at: new Date().toISOString()
                 };
-                
-                cmsData.customers.push(newCustomer);
-                updateAnalytics();
-                saveData();
-                
-                res.json({
-                    success: true,
-                    action: 'add_customer',
-                    data: newCustomer,
-                    message: 'Customer added successfully',
-                    timestamp: now
-                });
+                data.content.push(newContent);
+                writeData(data);
+                res.json({ success: true, content: newContent });
                 break;
-                
-            case 'get_analytics':
-                res.json({
-                    success: true,
-                    action: 'get_analytics',
-                    data: cmsData.analytics,
-                    timestamp: new Date().toISOString()
-                });
+
+            case 'update':
+                const contentId = parseInt(params.id);
+                const contentIndex = data.content.findIndex(c => c.id === contentId);
+                if (contentIndex !== -1) {
+                    data.content[contentIndex] = { ...data.content[contentIndex], ...params, updated_at: new Date().toISOString() };
+                    writeData(data);
+                    res.json({ success: true, content: data.content[contentIndex] });
+                } else {
+                    res.status(404).json({ success: false, error: 'Content not found' });
+                }
                 break;
-                
+
+            case 'delete':
+                const deleteId = parseInt(params.id);
+                const initialLength = data.content.length;
+                data.content = data.content.filter(c => c.id !== deleteId);
+                if (data.content.length < initialLength) {
+                    writeData(data);
+                    res.json({ success: true, message: 'Content deleted' });
+                } else {
+                    res.status(404).json({ success: false, error: 'Content not found' });
+                }
+                break;
+
             default:
-                res.status(400).json({
-                    success: false,
-                    error: `Unknown action: ${action}`,
-                    availableActions: [
-                        'get_customers', 
-                        'add_customer', 
-                        'get_analytics'
-                    ]
-                });
+                res.json({ success: true, content: data.content, total: data.content.length });
         }
-    } catch (error: any) {
-        console.error('Error executing action:', error);
-        res.status(500).json({
-            success: false,
-            error: 'Internal server error',
-            action: action
-        });
+    } catch (error) {
+        res.status(500).json({ success: false, error: 'Internal server error' });
     }
+});
+
+// Media processing endpoint
+app.post('/actions/media', (req: Request, res: Response) => {
+    const { action, ...params } = req.body;
+    const data = readData();
+
+    try {
+        switch (action) {
+            case 'upload':
+                const newMedia: MediaItem = {
+                    id: data.media.length + 1,
+                    filename: params.filename || 'unknown.jpg',
+                    type: params.type || 'image/jpeg',
+                    size: params.size || 0,
+                    optimized: false,
+                    url: `/media/${params.filename}`,
+                    created_at: new Date().toISOString()
+                };
+                data.media.push(newMedia);
+                writeData(data);
+                res.json({ success: true, media: newMedia });
+                break;
+
+            case 'optimize':
+                const mediaId = parseInt(params.id);
+                const mediaIndex = data.media.findIndex(m => m.id === mediaId);
+                if (mediaIndex !== -1) {
+                    data.media[mediaIndex].optimized = true;
+                    data.media[mediaIndex].size = Math.floor(data.media[mediaIndex].size * 0.7); // Simulate optimization
+                    writeData(data);
+                    res.json({ success: true, media: data.media[mediaIndex] });
+                } else {
+                    res.status(404).json({ success: false, error: 'Media not found' });
+                }
+                break;
+
+            default:
+                res.json({ success: true, media: data.media, total: data.media.length });
+        }
+    } catch (error) {
+        res.status(500).json({ success: false, error: 'Internal server error' });
+    }
+});
+
+// SEO optimization endpoint
+app.post('/actions/seo', (req: Request, res: Response) => {
+    const { action, ...params } = req.body;
+    const data = readData();
+
+    try {
+        switch (action) {
+            case 'analyze':
+                const contentId = parseInt(params.id);
+                const content = data.content.find(c => c.id === contentId);
+                if (content) {
+                    const score = Math.floor(Math.random() * 40) + 60; // Random score 60-100
+                    res.json({ 
+                        success: true, 
+                        seo_analysis: {
+                            content_id: contentId,
+                            score: score,
+                            recommendations: ['Add meta description', 'Optimize images', 'Improve heading structure']
+                        }
+                    });
+                } else {
+                    res.status(404).json({ success: false, error: 'Content not found' });
+                }
+                break;
+
+            case 'optimize':
+                const optimizeId = parseInt(params.id);
+                const contentIndex = data.content.findIndex(c => c.id === optimizeId);
+                if (contentIndex !== -1) {
+                    data.content[contentIndex].seo_score = 95; // Set high score after optimization
+                    writeData(data);
+                    res.json({ success: true, content: data.content[contentIndex] });
+                } else {
+                    res.status(404).json({ success: false, error: 'Content not found' });
+                }
+                break;
+
+            default:
+                res.json({ success: false, error: 'Unknown SEO action' });
+        }
+    } catch (error) {
+        res.status(500).json({ success: false, error: 'Internal server error' });
+    }
+});
+
+// Root endpoint
+app.get('/', (req: Request, res: Response) => {
+    res.json({
+        message: 'TypeScript CMS Plugin',
+        version: '1.0.0',
+        endpoints: ['/health', '/actions', '/actions/content', '/actions/media', '/actions/seo'],
+        timestamp: new Date().toISOString()
+    });
+});
+
+// Start the server
+app.listen(port, () => {
+    console.log(`TypeScript CMS Plugin HTTP server listening on port ${port}`);
 }); 

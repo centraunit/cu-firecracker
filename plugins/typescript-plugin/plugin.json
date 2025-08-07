@@ -1,21 +1,34 @@
 {
   "slug": "typescript-cms",
-  "name": "typescript-cms-plugin",
+  "name": "TypeScript CMS Plugin",
   "version": "1.0.0",
-  "port": 8080,
-  "description": "A TypeScript CMS plugin example",
+  "description": "Modern CMS content management plugin",
   "author": "CU Team",
   "runtime": "typescript",
   "actions": {
-    "test_action": {
-      "name": "Test Action Handler",
-      "description": "Simple test action",
-      "hooks": ["test.event"],
+    "content_management": {
+      "name": "Content Manager",
+      "description": "Manages CMS content and pages",
+      "hooks": ["content.create", "content.update", "content.delete"],
       "method": "POST",
-      "endpoint": "/actions/test",
+      "endpoint": "/actions/content",
       "priority": 10
+    },
+    "media_processing": {
+      "name": "Media Processor",
+      "description": "Handles media uploads and processing",
+      "hooks": ["media.upload", "media.process", "media.optimize"],
+      "method": "POST",
+      "endpoint": "/actions/media",
+      "priority": 7
+    },
+    "seo_optimization": {
+      "name": "SEO Optimizer",
+      "description": "Optimizes content for search engines",
+      "hooks": ["seo.analyze", "seo.optimize"],
+      "method": "POST",
+      "endpoint": "/actions/seo",
+      "priority": 5
     }
-  },
-  "health_endpoint": "/health",
-  "discovery_endpoint": "/actions"
+  }
 } 
