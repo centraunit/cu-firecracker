@@ -1,0 +1,64 @@
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## ❓ Questions & Answers
+        
+        **Get help with Firecracker CMS!** Ask questions about usage, architecture, or implementation.
+        
+        **Note:** This is proprietary software. Please respect the [LICENSE](../LICENSE) terms when asking questions.
+        
+        ---
+        
+  - type: checkboxes
+    id: acknowledgment
+    attributes:
+      label: Acknowledgment
+      options:
+        - label: I have read the README.md and documentation
+          required: true
+        - label: I understand this is proprietary software
+          required: true
+          
+  - type: dropdown
+    id: question-type
+    attributes:
+      label: Question Type
+      description: What kind of question is this?
+      options:
+        - Usage/How-to
+        - Architecture/Technical
+        - Plugin Development
+        - Performance
+        - Installation/Setup
+        - Troubleshooting
+        - Commercial Licensing
+        - Other
+    validations:
+      required: true
+      
+  - type: textarea
+    id: question
+    attributes:
+      label: Your Question
+      description: Ask your question clearly and provide context
+      placeholder: |
+        Please provide:
+        - Clear description of what you're trying to do
+        - What you've already tried
+        - Any error messages or issues
+        - Your environment (OS, Go version, etc.)
+    validations:
+      required: true
+      
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional Context
+      description: Any additional information that might help
+      placeholder: |
+        Optional additional details:
+        - Use case or project context
+        - Relevant code snippets
+        - Configuration details
+        - Expected vs actual behavior 

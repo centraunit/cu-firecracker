@@ -1,0 +1,65 @@
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## 💡 Feature Ideas & Suggestions
+        
+        **⚠️ IP Assignment Notice:** Any ideas, suggestions, or feature requests you submit become the intellectual property of Issa-projects as outlined in our [CONTRIBUTING.md](../CONTRIBUTING.md).
+        
+        ---
+        
+  - type: checkboxes
+    id: legal-agreement
+    attributes:
+      label: Legal Agreement & IP Assignment
+      description: Required for all feature suggestions
+      options:
+        - label: I assign all rights to this idea/suggestion to Issa-projects
+          required: true
+        - label: I understand this becomes proprietary intellectual property
+          required: true
+        - label: I waive any future claims to this idea
+          required: true
+          
+  - type: dropdown
+    id: category
+    attributes:
+      label: Feature Category
+      description: What area does this idea relate to?
+      options:
+        - Plugin System Enhancement
+        - Performance Optimization
+        - Security Improvement
+        - New Plugin Runtime
+        - Management UI
+        - CLI Tool Enhancement
+        - Documentation
+        - Other
+    validations:
+      required: true
+      
+  - type: textarea
+    id: feature-description
+    attributes:
+      label: Feature Description
+      description: Describe your idea in detail
+      placeholder: |
+        Clearly explain:
+        - What the feature would do
+        - How it would benefit users
+        - Technical implementation ideas
+        - Use cases or scenarios
+    validations:
+      required: true
+      
+  - type: textarea
+    id: technical-details
+    attributes:
+      label: Technical Implementation
+      description: Any technical details or suggestions for implementation
+      placeholder: |
+        Optional technical details:
+        - Architecture considerations
+        - Technology stack suggestions
+        - Integration points
+        - Performance implications 

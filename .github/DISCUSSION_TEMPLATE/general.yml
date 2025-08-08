@@ -1,0 +1,38 @@
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## 🚨 Legal Notice
+        
+        **This is proprietary software.** By participating in discussions, you acknowledge:
+        - You have read and understand the [LICENSE](../LICENSE) terms
+        - Any ideas or suggestions you share may be used by the project owner
+        - This software is protected intellectual property
+        
+        ---
+        
+  - type: checkboxes
+    id: legal-agreement
+    attributes:
+      label: Legal Agreement
+      description: Required before participating
+      options:
+        - label: I have read and agree to the LICENSE terms
+          required: true
+        - label: I understand this is proprietary software
+          required: true
+        - label: I agree that any ideas I share may be used by the project owner
+          required: true
+          
+  - type: textarea
+    id: discussion-content
+    attributes:
+      label: Discussion Content
+      description: Share your thoughts, questions, or ideas about Firecracker CMS
+      placeholder: |
+        Please be specific about:
+        - What aspect of the CMS you're discussing
+        - Any technical details or use cases
+        - Questions about implementation or architecture
+    validations:
+      required: true 
