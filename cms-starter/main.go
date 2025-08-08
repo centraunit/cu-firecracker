@@ -31,7 +31,7 @@ import (
 )
 
 const (
-	CMSImageName     = "cu-firecracker-cms:local"
+	CMSImageName     = "centraunit/cu-firecracker-cms:local"
 	CMSContainerName = "cu-firecracker-cms"
 )
 

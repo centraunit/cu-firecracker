@@ -241,7 +241,7 @@ make deploy
 
 # Or manually:
 # 1. Build CMS image
-cd cu-cms && docker build -t cu-firecracker-cms:local .
+cd cu-cms && docker build -t centraunit/cu-firecracker-cms:local .
 
 # 2. Build CLI tool  
 cd ../cms-starter && go build -o bin/cms-starter
