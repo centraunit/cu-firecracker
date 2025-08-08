@@ -1,3 +1,13 @@
+/*
+ * Firecracker CMS - Starter CLI Tool
+ * Copyright (c) 2025 Issa (Issa-projects)
+ * All rights reserved.
+ *
+ * This software is proprietary and confidential.
+ * Unauthorized copying, distribution, or use is strictly prohibited.
+ * See LICENSE file for terms and conditions.
+ */
+
 package main
 
 import (

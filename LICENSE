@@ -1,0 +1,74 @@
+Firecracker CMS - Proprietary License
+
+Copyright (c) 2025 Issa (Issa-projects)
+
+All rights reserved.
+
+TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+
+1. DEFINITIONS
+
+"License" means the terms and conditions for use, reproduction, and distribution as defined by this document.
+
+"Licensor" means Issa (Issa-projects), the copyright owner.
+
+"You" (or "Your") means an individual or Legal Entity exercising permissions granted by this License.
+
+"Work" means the Firecracker CMS software, including but not limited to source code, documentation, configuration files, and related materials made available under this License.
+
+"Derivative Works" means any work that is based on (or derived from) the Work.
+
+2. GRANT OF LIMITED RIGHTS
+
+Subject to the terms and conditions of this License, Licensor hereby grants You a limited, non-exclusive, non-transferable license to:
+
+a) View and study the source code for educational and evaluation purposes only
+b) Submit contributions (pull requests, issues, suggestions) to the original repository
+c) Use the software for personal, non-commercial evaluation and testing
+
+3. RESTRICTIONS
+
+You may NOT:
+
+a) Create forks, copies, or derivative works of this project
+b) Use this work for commercial purposes without explicit written permission
+c) Distribute, publish, or make available any part of this work outside the original repository
+d) Remove or modify copyright notices, license terms, or attribution
+e) Reverse engineer, decompile, or disassemble the work beyond what is necessary for evaluation
+f) Use the work as a basis for competing products or services
+g) Sublicense, sell, or transfer any rights granted under this license
+
+4. CONTRIBUTIONS
+
+By submitting any contribution to this project, You:
+
+a) Assign all rights, title, and interest in the contribution to the Licensor
+b) Represent that You have the right to make such assignment
+c) Waive any moral rights or similar rights You may have in the contribution
+d) Agree that the Licensor may use the contribution under any license terms they choose
+
+5. COMMERCIAL LICENSING
+
+Commercial use, redistribution, or derivative works require a separate commercial license agreement. Contact the Licensor for commercial licensing terms.
+
+6. TERMINATION
+
+This License is effective until terminated. Your rights under this License will terminate automatically if You fail to comply with any term(s) of this License. Upon termination, You must destroy all copies of the Work in Your possession.
+
+7. DISCLAIMER OF WARRANTY
+
+THE WORK IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+
+8. LIMITATION OF LIABILITY
+
+IN NO EVENT SHALL THE LICENSOR BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE WORK OR THE USE OR OTHER DEALINGS IN THE WORK.
+
+9. CONTACT
+
+For licensing inquiries, commercial use, or questions about this license:
+- GitHub: https://github.com/Issa-projects
+- Repository: https://github.com/Issa-projects/cu-firecracker
+
+This license is governed by the laws of [Your Country/State]. Any disputes shall be resolved in the courts of [Your Jurisdiction].
+
+By using this work, You acknowledge that You have read this License, understand it, and agree to be bound by its terms and conditions. 

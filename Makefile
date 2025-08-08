@@ -5,7 +5,6 @@ all: deploy
 
 deploy:
 	cd ./cu-cms && \
-	docker build -t issaprodev/cu-cms:latest . && \
-	docker push issaprodev/cu-cms:latest && \
-	cd ../cms-starter && \
+	docker build -t issaprodev/cu-cms:local . && \
+	cd ../cms-starter && go build -o bin/cms-starter && \
 	./bin/cms-starter restart
