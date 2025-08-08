@@ -1,11 +1,13 @@
 /*
  * Firecracker CMS - Starter CLI Tool
- * Copyright (c) 2025 Issa (Issa-projects)
+ * Copyright (c) 2025 CentraUnit Organization
  * All rights reserved.
  *
  * This software is proprietary and confidential.
  * Unauthorized copying, distribution, or use is strictly prohibited.
  * See LICENSE file for terms and conditions.
+ *
+ * Contributors: @centraunit-dev, @issa-projects
  */
 
 package main
@@ -29,7 +31,7 @@ import (
 )
 
 const (
-	CMSImageName     = "cu-firecracker-cms:local"
+	CMSImageName     = "centraunit/cu-firecracker-cms:local"
 	CMSContainerName = "cu-firecracker-cms"
 )
 

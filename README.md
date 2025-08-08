@@ -44,7 +44,7 @@ wget -O- https://go.dev/dl/go1.24.5.linux-amd64.tar.gz | sudo tar -C /usr/local 
 export PATH=$PATH:/usr/local/go/bin
 
 # Clone the repository
-git clone https://github.com/Issa-projects/cu-firecracker
+git clone https://github.com/centraunit/cu-firecracker
 cd cu-firecracker
 ```
 
@@ -220,7 +220,7 @@ curl -X POST -H "Content-Type: application/json" \
 
 ## 🤝 Contributing
 
-**⚠️ Important**: This is a proprietary project. By contributing, you assign all rights to your contributions to the project owner.
+**⚠️ Important**: This is a proprietary project. By contributing, you assign all rights to your contributions to CentraUnit Organization.
 
 We welcome contributors interested in:
 
@@ -241,7 +241,7 @@ make deploy
 
 # Or manually:
 # 1. Build CMS image
-cd cu-cms && docker build -t cu-firecracker-cms:local .
+cd cu-cms && docker build -t centraunit/cu-firecracker-cms:local .
 
 # 2. Build CLI tool  
 cd ../cms-starter && go build -o bin/cms-starter

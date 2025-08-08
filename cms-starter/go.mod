@@ -1,4 +1,4 @@
-module github.com/issaxx/cms-starter
+module github.com/centraunit/cu-firecracker-cms-starter
 
 go 1.24.5
 

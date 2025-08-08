@@ -1,6 +1,6 @@
 Firecracker CMS - Proprietary License
 
-Copyright (c) 2025 Issa (Issa-projects)
+Copyright (c) 2025 CentraUnit Organization
 
 All rights reserved.
 
@@ -10,7 +10,7 @@ TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
 
 "License" means the terms and conditions for use, reproduction, and distribution as defined by this document.
 
-"Licensor" means Issa (Issa-projects), the copyright owner.
+"Licensor" means CentraUnit Organization, the copyright owner.
 
 "You" (or "Your") means an individual or Legal Entity exercising permissions granted by this License.
 
@@ -42,10 +42,10 @@ g) Sublicense, sell, or transfer any rights granted under this license
 
 By submitting any contribution to this project, You:
 
-a) Assign all rights, title, and interest in the contribution to the Licensor
+a) Assign all rights, title, and interest in the contribution to CentraUnit Organization
 b) Represent that You have the right to make such assignment
 c) Waive any moral rights or similar rights You may have in the contribution
-d) Agree that the Licensor may use the contribution under any license terms they choose
+d) Agree that CentraUnit Organization may use the contribution under any license terms they choose
 
 5. COMMERCIAL LICENSING
 
@@ -66,8 +66,8 @@ IN NO EVENT SHALL THE LICENSOR BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILI
 9. CONTACT
 
 For licensing inquiries, commercial use, or questions about this license:
-- GitHub: https://github.com/Issa-projects
-- Repository: https://github.com/Issa-projects/cu-firecracker
+- GitHub: https://github.com/centraunit
+- Repository: https://github.com/centraunit/cu-firecracker
 
 This license is governed by the laws of [Your Country/State]. Any disputes shall be resolved in the courts of [Your Jurisdiction].
 
