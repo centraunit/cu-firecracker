@@ -1,21 +1,22 @@
 # Contributing to Firecracker CMS
 
-Thank you for your interest in contributing to Firecracker CMS! This document outlines the process and requirements for contributing to this proprietary project.
+Thank you for your interest in contributing to Firecracker CMS! This document outlines the process and requirements for contributing to this source-available project.
 
-## 🚨 Important Legal Notice
+## 📜 License and Contribution Terms
 
-This is a **proprietary project** with a custom license. By contributing, you agree to specific terms regarding intellectual property rights.
+This project uses a **Source Available License** that is GitHub-compliant and allows meaningful collaboration while protecting intellectual property.
 
 ## 📋 Contribution Requirements
 
-### 1. Contributor License Agreement (CLA)
+### 1. Contributor License Terms
 
 By submitting any contribution (code, documentation, ideas, etc.) to this project, you automatically agree that:
 
-- ✅ **You assign all rights** in your contribution to CentraUnit Organization
-- ✅ **You waive any moral rights** or similar rights you may have
-- ✅ **You represent that you have the right** to make such assignment
-- ✅ **The organization may use your contribution** under any license terms they choose
+- ✅ **You retain copyright** ownership of your contributions
+- ✅ **You grant broad usage rights** to CentraUnit Organization
+- ✅ **Your contributions will be licensed** under the same Source Available License
+- ✅ **You represent that you have the right** to make such contributions
+- ✅ **CentraUnit Organization may incorporate** your contributions into commercial products
 
 ### 2. What Constitutes a Contribution
 

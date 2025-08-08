@@ -1,8 +1,9 @@
-Firecracker CMS - Proprietary License
+CU Firecracker CMS - Source Available License
 
-Copyright (c) 2025 CentraUnit Organization
+Copyright (c) 2025 CentraUnit Organization. All rights reserved.
 
-All rights reserved.
+This software and associated documentation files (the "Software") are made 
+available under the following terms:
 
 TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
 
@@ -14,61 +15,80 @@ TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
 
 "You" (or "Your") means an individual or Legal Entity exercising permissions granted by this License.
 
-"Work" means the Firecracker CMS software, including but not limited to source code, documentation, configuration files, and related materials made available under this License.
+"Work" means the CU Firecracker CMS software, including but not limited to source code, documentation, configuration files, and related materials made available under this License.
 
-"Derivative Works" means any work that is based on (or derived from) the Work.
+"Fork" means a copy of the repository that allows You to freely experiment with changes without affecting the original project.
 
-2. GRANT OF LIMITED RIGHTS
+2. PERMITTED ACTIVITIES
 
-Subject to the terms and conditions of this License, Licensor hereby grants You a limited, non-exclusive, non-transferable license to:
+Subject to the terms and conditions of this License, Licensor hereby grants You the right to:
 
-a) View and study the source code for educational and evaluation purposes only
-b) Submit contributions (pull requests, issues, suggestions) to the original repository
-c) Use the software for personal, non-commercial evaluation and testing
+a) View, study, and learn from the source code for educational and evaluation purposes
+b) Fork the repository on GitHub for personal use and contributions (GitHub ToS compliance)
+c) Create local copies for development, testing, and contribution purposes
+d) Submit pull requests and contributions to the original repository (see CONTRIBUTING.md)
+e) Use the software for personal, educational, and non-commercial research purposes
+f) Create derivative works solely for the purpose of contributing back to the original project
+g) Share the repository URL and discuss the project publicly
 
 3. RESTRICTIONS
 
 You may NOT:
 
-a) Create forks, copies, or derivative works of this project
-b) Use this work for commercial purposes without explicit written permission
-c) Distribute, publish, or make available any part of this work outside the original repository
+a) Use this software for commercial purposes without explicit written permission from CentraUnit Organization
+b) Distribute, publish, or redistribute the software or substantial portions thereof outside of GitHub
+c) Create derivative works for commercial distribution or competing products
 d) Remove or modify copyright notices, license terms, or attribution
-e) Reverse engineer, decompile, or disassemble the work beyond what is necessary for evaluation
-f) Use the work as a basis for competing products or services
-g) Sublicense, sell, or transfer any rights granted under this license
+e) Use CentraUnit trademarks, logos, or branding without written permission
+f) Sublicense, sell, or transfer any rights granted under this license
+g) Use the work in violation of applicable laws or regulations
 
-4. CONTRIBUTIONS
+4. GITHUB COMPLIANCE
 
-By submitting any contribution to this project, You:
+This license explicitly permits repository forking on GitHub as required by GitHub's Terms of Service.
+Forks are permitted for:
+- Contributing back to the original project
+- Personal study, experimentation, and learning
+- Non-commercial derivative development
+- Educational and research purposes
 
-a) Assign all rights, title, and interest in the contribution to CentraUnit Organization
-b) Represent that You have the right to make such assignment
-c) Waive any moral rights or similar rights You may have in the contribution
-d) Agree that CentraUnit Organization may use the contribution under any license terms they choose
+5. CONTRIBUTIONS
 
-5. COMMERCIAL LICENSING
+By contributing to this project, You:
 
-Commercial use, redistribution, or derivative works require a separate commercial license agreement. Contact the Licensor for commercial licensing terms.
+a) Grant CentraUnit Organization a perpetual, worldwide, non-exclusive, royalty-free license to use, modify, and distribute your contributions
+b) Retain copyright ownership of your contributions while granting broad usage rights to CentraUnit Organization
+c) Agree your contributions will be licensed under this same license
+d) Represent and warrant that You have the right to make such contributions
+e) Agree that CentraUnit Organization may incorporate your contributions into commercial products
 
-6. TERMINATION
+6. COMMERCIAL USE
 
-This License is effective until terminated. Your rights under this License will terminate automatically if You fail to comply with any term(s) of this License. Upon termination, You must destroy all copies of the Work in Your possession.
+For commercial licensing, enterprise support, white-label solutions, or any commercial use of this software, please contact: legal@centraunit.org
 
-7. DISCLAIMER OF WARRANTY
+7. INTELLECTUAL PROPERTY
 
-THE WORK IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+This license is designed to protect CentraUnit Organization's intellectual property while allowing meaningful open collaboration. The source code remains proprietary to CentraUnit Organization.
 
-8. LIMITATION OF LIABILITY
+8. TERMINATION
 
-IN NO EVENT SHALL THE LICENSOR BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE WORK OR THE USE OR OTHER DEALINGS IN THE WORK.
+This License is effective until terminated. Your rights under this License will terminate automatically if You violate any of its terms. Upon termination, You must cease use of the software but are not required to delete forks or copies already created in compliance with this license.
 
-9. CONTACT
+9. DISCLAIMER OF WARRANTY
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+
+10. LIMITATION OF LIABILITY
+
+IN NO EVENT SHALL THE LICENSOR BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+11. CONTACT
 
 For licensing inquiries, commercial use, or questions about this license:
 - GitHub: https://github.com/centraunit
 - Repository: https://github.com/centraunit/cu-firecracker
+- Email: legal@centraunit.org
 
-This license is governed by the laws of [Your Country/State]. Any disputes shall be resolved in the courts of [Your Jurisdiction].
+This license is governed by the laws of the United States. Any disputes shall be resolved through binding arbitration.
 
-By using this work, You acknowledge that You have read this License, understand it, and agree to be bound by its terms and conditions. 
+This license is designed to be compatible with GitHub's Terms of Service while protecting CentraUnit Organization's intellectual property rights. By using this software, You acknowledge that You have read this License, understand it, and agree to be bound by its terms and conditions. 

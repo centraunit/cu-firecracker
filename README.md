@@ -275,16 +275,17 @@ go test ./...
 
 ## 📄 License
 
-**Proprietary License** - This project is protected intellectual property.
+**Source Available License** - This project uses a GitHub-compliant license that protects intellectual property while enabling collaboration.
 
 - ✅ **View & Study**: Source code available for educational purposes
-- ✅ **Contribute**: Submit pull requests and improvements
-- ✅ **Evaluate**: Test for personal, non-commercial use
-- ❌ **No Forks**: Creating copies or forks is prohibited
-- ❌ **No Commercial Use**: Requires separate commercial license
-- ❌ **No Redistribution**: Cannot distribute outside original repository
+- ✅ **Fork & Clone**: GitHub-compliant forking for personal use and contributions
+- ✅ **Contribute**: Submit pull requests and improvements  
+- ✅ **Educational Use**: Perfect for learning and research
+- ✅ **Personal Projects**: Use for non-commercial purposes
+- ❌ **Commercial Use**: Requires separate commercial license
+- ❌ **Redistribution**: Cannot distribute outside of GitHub
 
-**Commercial licensing available** - Contact for business use, redistribution rights, or white-label solutions.
+**Commercial licensing available** - Contact legal@centraunit.org for business use, enterprise support, or white-label solutions.
 
 See [LICENSE](LICENSE) for complete terms.
 
