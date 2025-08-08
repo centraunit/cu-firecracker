@@ -4,7 +4,7 @@ body:
       value: |
         ## 💡 Feature Ideas & Suggestions
         
-        **⚠️ IP Assignment Notice:** Any ideas, suggestions, or feature requests you submit become the intellectual property of Issa-projects as outlined in our [CONTRIBUTING.md](../CONTRIBUTING.md).
+        **⚠️ IP Assignment Notice:** Any ideas, suggestions, or feature requests you submit become the intellectual property of CentraUnit Organization as outlined in our [CONTRIBUTING.md](../CONTRIBUTING.md).
         
         ---
         
@@ -14,7 +14,7 @@ body:
       label: Legal Agreement & IP Assignment
       description: Required for all feature suggestions
       options:
-        - label: I assign all rights to this idea/suggestion to Issa-projects
+        - label: I assign all rights to this idea/suggestion to CentraUnit Organization
           required: true
         - label: I understand this becomes proprietary intellectual property
           required: true

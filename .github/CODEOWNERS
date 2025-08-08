@@ -1,23 +1,23 @@
-# Global rule - Issa-projects must approve all changes
-* @Issa-projects
+# Global rule - CentraUnit admins must approve all changes
+* @centraunit-dev @issa-projects
 
 # Critical license and legal files - Extra protection
-LICENSE @Issa-projects
-CONTRIBUTING.md @Issa-projects  
-NOTICE @Issa-projects
-README.md @Issa-projects
+LICENSE @centraunit-dev @issa-projects
+CONTRIBUTING.md @centraunit-dev @issa-projects  
+NOTICE @centraunit-dev @issa-projects
+README.md @centraunit-dev @issa-projects
 
 # Source code files - Core IP protection
-*.go @Issa-projects
-Makefile @Issa-projects
-Dockerfile @Issa-projects
+*.go @centraunit-dev @issa-projects
+Makefile @centraunit-dev @issa-projects
+Dockerfile @centraunit-dev @issa-projects
 
 # Configuration and build files
-go.mod @Issa-projects
-go.sum @Issa-projects
-*.json @Issa-projects
+go.mod @centraunit-dev @issa-projects
+go.sum @centraunit-dev @issa-projects
+*.json @centraunit-dev @issa-projects
 
 # Plugin system
-/plugins/ @Issa-projects
-/cms-starter/ @Issa-projects
-/cu-cms/ @Issa-projects 
+/plugins/ @centraunit-dev @issa-projects
+/cms-starter/ @centraunit-dev @issa-projects
+/cu-cms/ @centraunit-dev @issa-projects 

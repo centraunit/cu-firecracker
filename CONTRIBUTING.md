@@ -12,10 +12,10 @@ This is a **proprietary project** with a custom license. By contributing, you ag
 
 By submitting any contribution (code, documentation, ideas, etc.) to this project, you automatically agree that:
 
-- ✅ **You assign all rights** in your contribution to Issa (Issa-projects)
+- ✅ **You assign all rights** in your contribution to CentraUnit Organization
 - ✅ **You waive any moral rights** or similar rights you may have
 - ✅ **You represent that you have the right** to make such assignment
-- ✅ **The project owner may use your contribution** under any license terms they choose
+- ✅ **The organization may use your contribution** under any license terms they choose
 
 ### 2. What Constitutes a Contribution
 
@@ -79,7 +79,7 @@ We will **reject** contributions that:
 
 1. **No Ownership Retention**: You cannot retain ownership of contributed code
 2. **No Attribution Rights**: While we appreciate contributions, you cannot claim ongoing rights
-3. **No License Restrictions**: The project owner can relicense your contributions as needed
+3. **No License Restrictions**: CentraUnit Organization can relicense your contributions as needed
 4. **Commercial Use**: Your contributions may be used in commercial offerings
 
 ### What We Provide in Return
