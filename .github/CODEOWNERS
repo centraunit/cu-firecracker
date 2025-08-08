@@ -1,0 +1,23 @@
+# Global rule - Issa-projects must approve all changes
+* @Issa-projects
+
+# Critical license and legal files - Extra protection
+LICENSE @Issa-projects
+CONTRIBUTING.md @Issa-projects  
+NOTICE @Issa-projects
+README.md @Issa-projects
+
+# Source code files - Core IP protection
+*.go @Issa-projects
+Makefile @Issa-projects
+Dockerfile @Issa-projects
+
+# Configuration and build files
+go.mod @Issa-projects
+go.sum @Issa-projects
+*.json @Issa-projects
+
+# Plugin system
+/plugins/ @Issa-projects
+/cms-starter/ @Issa-projects
+/cu-cms/ @Issa-projects 
