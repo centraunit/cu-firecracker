@@ -22,7 +22,7 @@ build/*
 
 # Go workspace file
 go.work
-
+cms-data
 # IDE files
 .vscode/
 .idea/

@@ -191,32 +191,140 @@ The plugin build process:
 - **Resource Limits**: Each VM limited to prevent resource exhaustion
 - **Network Isolation**: No plugin can interfere with others
 
-## 🧪 Testing & Debugging
+## 🧪 Testing & Development Workflow
+
+### Makefile Commands
+
+The project includes a comprehensive Makefile for streamlined development:
 
 ```bash
-# CMS Management
+# 🚀 Quick Start Commands
+make deploy          # Build production image & restart CMS
+make dev            # Start CMS in development mode  
+make test           # Run complete test suite
+make clean          # Stop containers & clean up images
+
+# 📋 Detailed Command Breakdown:
+
+# Development Mode
+make dev
+# - Builds centraunit/cu-firecracker-cms:dev image
+# - Compiles cms-starter CLI tool
+# - Starts CMS container with development settings
+# - Available at http://localhost:80
+
+# Production Deployment  
+make deploy
+# - Builds centraunit/cu-firecracker-cms:latest image
+# - Compiles cms-starter CLI tool
+# - Restarts CMS container for production use
+# - Available at http://localhost:80
+
+# Comprehensive Testing
+make test
+# Step 1: Runs cms-starter unit tests
+# Step 2: Builds centraunit/cu-firecracker-cms:test image  
+# Step 3: Runs CMS unit tests in Docker container
+# Step 4: Starts CMS container for integration testing
+# Step 5: Runs integration tests against live CMS:
+#   - Builds real Python plugin using cms-starter
+#   - Uploads plugin via API
+#   - Activates plugin (creates Firecracker VM snapshot)
+#   - Executes plugin actions
+#   - Verifies complete workflow
+# Step 6: Cleans up test containers
+
+# Cleanup
+make clean
+# - Stops all CMS containers (dev/prod/test)
+# - Removes all CMS Docker images
+# - Cleans up temporary files
+```
+
+### Manual Testing & Debugging
+
+```bash
+# 🔍 CMS Management & Status
 ./cms-starter/bin/cms-starter status              # Check CMS status
 ./cms-starter/bin/cms-starter restart             # Restart after changes
+./cms-starter/bin/cms-starter stop               # Stop CMS gracefully
 
-# View CMS logs
-docker logs cu-firecracker-cms --tail 100
+# 📱 Plugin Development Workflow
+# 1. Build plugin (auto-detects optimal size)
+./cms-starter/bin/cms-starter plugin build --plugin plugins/python-plugin --size 400
 
-# Plugin Development
-./cms-starter/bin/cms-starter plugin build --plugin plugins/my-plugin --size 400
-curl -X POST -F "plugin=@plugins/my-plugin/build/my-plugin-1.0.0.zip" http://localhost:80/api/plugins
+# 2. Upload to running CMS
+curl -X POST -F "plugin=@plugins/python-plugin/build/python-analytics-plugin-1.0.0.zip" \
+     http://localhost:80/api/plugins
 
-# System Debugging
-docker exec cu-firecracker-cms ps aux            # Check running processes
-docker exec cu-firecracker-cms ip addr show      # Network debugging
-docker exec cu-firecracker-cms ls -la /app/data  # Check data persistence
+# 3. Check plugin status
+curl -s http://localhost:80/api/plugins | jq '.'
 
-# API Testing
-curl http://localhost:80/api/health               # System health
-curl http://localhost:80/api/plugins              # List plugins
+# 4. Activate plugin (creates VM snapshot)
+curl -X POST http://localhost:80/api/plugins/python-analytics/activate
+
+# 5. Execute plugin action
 curl -X POST -H "Content-Type: application/json" \
-     -d '{"action": "content.create", "payload": {"title": "Test"}}' \
-     http://localhost:80/api/execute              # Execute actions
+     -d '{"action":"data.analyze","data":{"test":"sample"}}' \
+     http://localhost:80/api/execute
+
+# 🔧 System Debugging
+# View real-time CMS logs
+docker logs cu-firecracker-cms --tail 100 -f
+
+# Inspect running container
+docker exec cu-firecracker-cms ps aux            # Check processes
+docker exec cu-firecracker-cms ip addr show      # Network interfaces
+docker exec cu-firecracker-cms ls -la /app/data  # Data persistence
+docker exec cu-firecracker-cms ls -la /tmp       # Firecracker sockets
+
+# Debug plugin build issues
+./cms-starter/bin/cms-starter plugin build --plugin plugins/my-plugin --size 500 --verbose
+
+# 🌐 API Testing Examples
+# System health
+curl -s http://localhost:80/health | jq '.'
+
+# List all plugins
+curl -s http://localhost:80/api/plugins | jq '.'
+
+# Get specific plugin details
+curl -s http://localhost:80/api/plugins/python-analytics | jq '.'
+
+# Execute action with detailed payload
+curl -X POST -H "Content-Type: application/json" \
+     -d '{
+       "action": "data.process",
+       "payload": {
+         "input": "sample data",
+         "format": "json",
+         "options": {"verbose": true}
+       }
+     }' \
+     http://localhost:80/api/execute | jq '.'
+
+# Plugin lifecycle management
+curl -X POST http://localhost:80/api/plugins/my-plugin/activate
+curl -X POST http://localhost:80/api/plugins/my-plugin/deactivate  
+curl -X DELETE http://localhost:80/api/plugins/my-plugin
 ```
+
+### Test Coverage
+
+The integrated test suite verifies:
+
+✅ **Unit Tests**: Individual component functionality  
+✅ **Integration Tests**: Complete plugin workflow:
+  - Plugin building with cms-starter CLI
+  - Plugin upload via API
+  - Health check (Firecracker VM startup)
+  - Plugin activation (snapshot creation)
+  - Action execution against live plugins
+  - Response validation and cleanup
+
+✅ **Docker Tests**: CMS functionality in containerized environment  
+✅ **API Tests**: All REST endpoints and error handling  
+✅ **VM Manager Tests**: Firecracker integration and networking
 
 ## 🤝 Contributing
 
@@ -236,10 +344,11 @@ We welcome contributors interested in:
 ### Development Setup
 
 ```bash
-# Build and start everything (recommended)
-make deploy
+# 🚀 Quick Setup (Recommended)
+make dev              # Start development environment
+make test             # Verify everything works
 
-# Or manually:
+# 📋 Manual Setup (Advanced)
 # 1. Build CMS image
 cd cu-cms && docker build -t centraunit/cu-firecracker-cms:local .
 
@@ -249,13 +358,48 @@ cd ../cms-starter && go build -o bin/cms-starter
 # 3. Start CMS
 ./bin/cms-starter start --port 80
 
-# Development workflow
+# 🔄 Development Workflow
+make dev              # Start/restart development environment
+make test             # Run comprehensive test suite after changes
+make clean            # Clean up when switching contexts
+
+# Alternative manual commands:
 ./bin/cms-starter restart  # After code changes
 ./bin/cms-starter status   # Check if running
 ./bin/cms-starter stop     # Stop for maintenance
 
-# Run tests
-go test ./...
+# 🧪 Testing Workflow
+make test             # Full test suite (recommended)
+# OR individual test components:
+cd cms-starter && go test -v ./...              # Unit tests only
+./bin/cms-starter start --test                  # Integration tests only
+cd ../cu-cms && go test -v ./...                # CMS tests only
+```
+
+### Prerequisites for Development
+
+```bash
+# System Requirements
+sudo apt update && sudo apt install -y docker.io curl jq
+
+# Ensure Docker daemon is running
+sudo systemctl start docker
+sudo usermod -aG docker $USER  # Add user to docker group
+newgrp docker                  # Refresh group membership
+
+# Install Go (1.19+)
+wget -O- https://go.dev/dl/go1.24.5.linux-amd64.tar.gz | sudo tar -C /usr/local -xzf -
+export PATH=$PATH:/usr/local/go/bin
+
+# For Firecracker development (Linux + KVM required)
+# Check KVM availability:
+ls -la /dev/kvm
+# Should show: crw-rw-rw- 1 root kvm /dev/kvm
+
+# Clone and setup
+git clone https://github.com/centraunit/cu-firecracker
+cd cu-firecracker
+make dev              # This will build everything and start CMS
 ```
 
 ## 🎪 Use Cases

@@ -26,7 +26,7 @@
       "name": "Data Visualizer",
       "description": "Creates charts and graphs from data",
       "hooks": ["data.visualize", "chart.create"],
-      "method": "POST",
+      "method": "POST", 
       "endpoint": "/actions/visualize",
       "priority": 8
     }
