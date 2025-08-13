@@ -14,6 +14,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -45,7 +46,24 @@ func main() {
 	log_instance := logger.GetDefault()
 	log_instance.WithFields(logger.Fields{
 		"version": "1.0.0",
+		"mode":    cfg.GetModeString(),
+		"debug":   cfg.IsDebugMode(),
+		"verbose": cfg.Verbose,
+		"port":    cfg.Port,
 	}).Info("Starting CMS application")
+
+	// Print environment-specific startup banner
+	if cfg.IsDevelopmentMode() {
+		log_instance.Info("🚀 CMS starting in DEVELOPMENT mode")
+		log_instance.Info("📊 Debug logging: enabled")
+		log_instance.Info("🔍 Verbose logging: " + fmt.Sprintf("%t", cfg.Verbose))
+	} else if cfg.IsTestMode() {
+		log_instance.Info("🧪 CMS starting in TEST mode")
+		log_instance.Info("📊 Debug logging: enabled")
+	} else {
+		log_instance.Info("🏭 CMS starting in PRODUCTION mode")
+		log_instance.Info("📊 Debug logging: " + fmt.Sprintf("%t", cfg.IsDebugMode()))
+	}
 
 	// Initialize VM service
 	vmService, err := services.NewVMService(cfg)
@@ -56,7 +74,7 @@ func main() {
 	}
 
 	// Initialize plugin service
-	pluginService := services.NewPluginService(cfg, log_instance)
+	pluginService := services.NewPluginService(cfg, log_instance, vmService)
 
 	// Initialize server
 	srv := server.New(cfg, log_instance, vmService, pluginService)

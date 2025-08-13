@@ -58,6 +58,28 @@ func NewClient() (*Client, error) {
 	}, nil
 }
 
+// NewClientWithConfig creates a new Docker client with specific configuration
+func NewClientWithConfig(dockerHost string) (*Client, error) {
+	opts := []client.Opt{
+		client.WithAPIVersionNegotiation(),
+	}
+
+	// Set Docker host if specified
+	if dockerHost != "" {
+		opts = append(opts, client.WithHost(dockerHost))
+	}
+
+	cli, err := client.NewClientWithOpts(opts...)
+	if err != nil {
+		return nil, errors.WrapDockerError(err, "docker_client_init", "failed to initialize Docker client")
+	}
+
+	return &Client{
+		client: cli,
+		logger: logger.GetDefault(),
+	}, nil
+}
+
 // Close closes the Docker client connection
 func (c *Client) Close() error {
 	return c.client.Close()

@@ -120,3 +120,13 @@ func (c *Config) GetContainerName() string {
 func (c *Config) IsProductionMode() bool {
 	return !c.DevMode && !c.TestMode
 }
+
+// GetModeString returns a human-readable string for the current mode
+func (c *Config) GetModeString() string {
+	if c.TestMode {
+		return "test"
+	} else if c.DevMode {
+		return "development"
+	}
+	return "production"
+}

@@ -27,22 +27,27 @@ import (
 
 // PluginService handles plugin management operations
 type PluginService struct {
-	config  *config.Config
-	logger  *logger.Logger
-	plugins map[string]*models.Plugin
-	mutex   sync.RWMutex
+	config    *config.Config
+	logger    *logger.Logger
+	plugins   map[string]*models.Plugin
+	mutex     sync.RWMutex
+	vmService *VMService
 }
 
 // NewPluginService creates a new plugin service
-func NewPluginService(cfg *config.Config, log *logger.Logger) *PluginService {
+func NewPluginService(cfg *config.Config, log *logger.Logger, vmService *VMService) *PluginService {
 	service := &PluginService{
-		config:  cfg,
-		logger:  log,
-		plugins: make(map[string]*models.Plugin),
+		config:    cfg,
+		logger:    log,
+		plugins:   make(map[string]*models.Plugin),
+		vmService: vmService,
 	}
 
 	// Load existing plugins from disk
 	service.loadPlugins()
+
+	// Restore active plugins after startup
+	service.restoreActivePlugins()
 
 	return service
 }
@@ -122,6 +127,15 @@ func (ps *PluginService) UploadPlugin(file multipart.File, filename string) (*mo
 		return nil, fmt.Errorf("plugin must provide a unique slug in plugin.json")
 	}
 
+	// Validate plugin metadata
+	if metadata.Name == "" {
+		return nil, fmt.Errorf("plugin must provide a name in plugin.json")
+	}
+
+	if metadata.Version == "" {
+		return nil, fmt.Errorf("plugin must provide a version in plugin.json")
+	}
+
 	// Move rootfs to final location using slug-based naming
 	rootfsTempPath := filepath.Join(tempDir, "rootfs.ext4")
 	rootfsPath := filepath.Join(pluginsDir, metadata.Slug+".ext4")
@@ -139,7 +153,50 @@ func (ps *PluginService) UploadPlugin(file multipart.File, filename string) (*mo
 
 	// Check if plugin already exists (update scenario)
 	if existingPlugin, exists := ps.plugins[metadata.Slug]; exists {
-		// Update existing plugin
+		ps.logger.WithFields(logger.Fields{
+			"plugin_slug": metadata.Slug,
+			"old_version": existingPlugin.Version,
+			"new_version": metadata.Version,
+			"old_status":  existingPlugin.Status,
+		}).Info("Updating existing plugin")
+
+		// Handle cleanup of existing plugin resources if it's active or has resources
+		if existingPlugin.Status == "active" || existingPlugin.AssignedIP != "" || existingPlugin.TapDevice != "" {
+			ps.logger.WithFields(logger.Fields{
+				"plugin_slug": metadata.Slug,
+				"status":      existingPlugin.Status,
+				"has_ip":      existingPlugin.AssignedIP != "",
+				"has_tap":     existingPlugin.TapDevice != "",
+			}).Info("Cleaning up existing plugin resources before update")
+
+			// Remove from prewarm pool if exists
+			ps.vmService.RemoveFromPrewarmPool(metadata.Slug)
+
+			// Stop any running VM instance
+			instanceID := metadata.Slug
+			if err := ps.vmService.StopVM(instanceID); err != nil {
+				ps.logger.WithFields(logger.Fields{
+					"plugin_slug": metadata.Slug,
+					"error":       err,
+				}).Warn("Failed to stop existing VM during update")
+				// Continue with update even if cleanup fails
+			}
+
+			// Delete existing snapshot to force fresh snapshot creation
+			if err := ps.vmService.DeleteSnapshot(metadata.Slug); err != nil {
+				ps.logger.WithFields(logger.Fields{
+					"plugin_slug": metadata.Slug,
+					"error":       err,
+				}).Warn("Failed to delete existing snapshot during update")
+				// Continue with update even if snapshot deletion fails
+			}
+
+			ps.logger.WithFields(logger.Fields{
+				"plugin_slug": metadata.Slug,
+			}).Info("Successfully cleaned up existing plugin resources")
+		}
+
+		// Update existing plugin metadata
 		existingPlugin.Name = metadata.Name
 		existingPlugin.Description = metadata.Description
 		existingPlugin.Version = metadata.Version
@@ -147,19 +204,106 @@ func (ps *PluginService) UploadPlugin(file multipart.File, filename string) (*mo
 		existingPlugin.Runtime = metadata.Runtime
 		existingPlugin.RootfsPath = rootfsPath
 		existingPlugin.UpdatedAt = time.Now()
-		existingPlugin.Status = "ready"
+		existingPlugin.Status = "ready" // Will be updated to "installed" after validation
 		existingPlugin.Actions = metadata.Actions
 		existingPlugin.Health = models.PluginHealth{Status: "unknown"}
+		// Preserve existing network configuration for now, will be updated during validation
+		// Note: We'll validate and potentially update network config during the health check phase
 
 		// Save plugins registry
 		if err := ps.savePluginsUnsafe(); err != nil {
 			return nil, fmt.Errorf("failed to save plugins: %v", err)
 		}
 
+		// Start VM for health check and installation validation (for updates)
 		ps.logger.WithFields(logger.Fields{
-			"plugin_slug": metadata.Slug,
+			"plugin_slug": existingPlugin.Slug,
+		}).Info("Starting VM for plugin update validation")
+
+		// Use plugin slug as instance ID for consistency
+		instanceID := existingPlugin.Slug
+
+		// Start VM for health check
+		if err := ps.vmService.StartVM(instanceID, existingPlugin); err != nil {
+			ps.logger.WithFields(logger.Fields{
+				"plugin_slug": existingPlugin.Slug,
+				"error":       err,
+			}).Error("Failed to start VM for plugin update validation")
+			return nil, fmt.Errorf("failed to start VM for update validation: %v", err)
+		}
+
+		// Get VM IP from static networking
+		vmIP, exists := ps.vmService.GetVMIP(instanceID)
+		if !exists {
+			ps.logger.WithFields(logger.Fields{
+				"plugin_slug": existingPlugin.Slug,
+			}).Error("Failed to get VM IP after start")
+			// Clean up VM on failure
+			if stopErr := ps.vmService.StopVM(instanceID); stopErr != nil {
+				ps.logger.WithFields(logger.Fields{
+					"plugin_slug": existingPlugin.Slug,
+					"error":       stopErr,
+				}).Error("Failed to stop VM after IP retrieval failure")
+			}
+			return nil, fmt.Errorf("failed to get VM IP for update validation")
+		}
+
+		ps.logger.WithFields(logger.Fields{
+			"plugin_slug": existingPlugin.Slug,
+			"vm_ip":       vmIP,
+		}).Info("VM started successfully for update validation")
+
+		// Allow extra time for VM boot and application initialization
+		time.Sleep(3 * time.Second)
+
+		// Perform health validation using centralized method
+		if err := ps.validatePluginHealth(existingPlugin, instanceID, vmIP, "plugin_update"); err != nil {
+			return nil, err
+		}
+
+		// Update plugin with assigned IP and TAP device
+		// For updates, try to preserve existing network configuration if available
+		if existingPlugin.AssignedIP == "" || existingPlugin.TapDevice == "" {
+			// No existing network config, use new assignment
+			existingPlugin.AssignedIP = vmIP
+			existingPlugin.TapDevice = ps.vmService.GetTapNameForPlugin(existingPlugin.Slug)
+			ps.logger.WithFields(logger.Fields{
+				"plugin_slug": existingPlugin.Slug,
+				"assigned_ip": existingPlugin.AssignedIP,
+				"tap_device":  existingPlugin.TapDevice,
+			}).Info("Assigned new network configuration for plugin update")
+		} else {
+			// Preserve existing network configuration
+			ps.logger.WithFields(logger.Fields{
+				"plugin_slug": existingPlugin.Slug,
+				"assigned_ip": existingPlugin.AssignedIP,
+				"tap_device":  existingPlugin.TapDevice,
+			}).Info("Preserved existing network configuration for plugin update")
+		}
+		existingPlugin.Status = "installed"
+		existingPlugin.UpdatedAt = time.Now()
+
+		// Save updated plugin state
+		if err := ps.savePluginsUnsafe(); err != nil {
+			ps.logger.WithFields(logger.Fields{
+				"plugin_slug": existingPlugin.Slug,
+				"error":       err,
+			}).Error("Failed to save plugin state after successful update")
+			// Clean up VM on save failure
+			ps.cleanupPluginVM(existingPlugin.Slug, instanceID, "plugin_update_save_failure")
+			return nil, fmt.Errorf("failed to save plugin state: %v", err)
+		}
+
+		// Clean up VM and network - no prewarm during update, clean for next step
+		ps.cleanupPluginVM(existingPlugin.Slug, instanceID, "plugin_update_success")
+
+		ps.logger.WithFields(logger.Fields{
+			"plugin_slug": existingPlugin.Slug,
 			"version":     metadata.Version,
-		}).Info("Plugin updated successfully")
+			"assigned_ip": existingPlugin.AssignedIP,
+			"tap_device":  existingPlugin.TapDevice,
+			"status":      existingPlugin.Status,
+		}).Info("Plugin updated and installed successfully")
 
 		return existingPlugin, nil
 	}
@@ -188,11 +332,80 @@ func (ps *PluginService) UploadPlugin(file multipart.File, filename string) (*mo
 		return nil, fmt.Errorf("failed to save plugins: %v", err)
 	}
 
+	// Start VM for health check and installation validation
+	ps.logger.WithFields(logger.Fields{
+		"plugin_slug": plugin.Slug,
+	}).Info("Starting VM for plugin installation validation")
+
+	// Use plugin slug as instance ID for consistency
+	instanceID := plugin.Slug
+
+	// Start VM for health check
+	if err := ps.vmService.StartVM(instanceID, plugin); err != nil {
+		ps.logger.WithFields(logger.Fields{
+			"plugin_slug": plugin.Slug,
+			"error":       err,
+		}).Error("Failed to start VM for plugin installation validation")
+		return nil, fmt.Errorf("failed to start VM for installation validation: %v", err)
+	}
+
+	// Get VM IP from static networking
+	vmIP, exists := ps.vmService.GetVMIP(instanceID)
+	if !exists {
+		ps.logger.WithFields(logger.Fields{
+			"plugin_slug": plugin.Slug,
+		}).Error("Failed to get VM IP after start")
+		// Clean up VM on failure
+		if stopErr := ps.vmService.StopVM(instanceID); stopErr != nil {
+			ps.logger.WithFields(logger.Fields{
+				"plugin_slug": plugin.Slug,
+				"error":       stopErr,
+			}).Error("Failed to stop VM after IP retrieval failure")
+		}
+		return nil, fmt.Errorf("failed to get VM IP for installation validation")
+	}
+
+	ps.logger.WithFields(logger.Fields{
+		"plugin_slug": plugin.Slug,
+		"vm_ip":       vmIP,
+	}).Info("VM started successfully for installation validation")
+
+	// Allow extra time for VM boot and application initialization
+	time.Sleep(3 * time.Second)
+
+	// Perform health validation using centralized method
+	if err := ps.validatePluginHealth(plugin, instanceID, vmIP, "plugin_upload"); err != nil {
+		return nil, err
+	}
+
+	// Update plugin with assigned IP and TAP device
+	plugin.AssignedIP = vmIP
+	plugin.TapDevice = ps.vmService.GetTapNameForPlugin(plugin.Slug)
+	plugin.Status = "installed"
+	plugin.UpdatedAt = time.Now()
+
+	// Save updated plugin state
+	if err := ps.savePluginsUnsafe(); err != nil {
+		ps.logger.WithFields(logger.Fields{
+			"plugin_slug": plugin.Slug,
+			"error":       err,
+		}).Error("Failed to save plugin state after successful installation")
+		// Clean up VM on save failure
+		ps.cleanupPluginVM(plugin.Slug, instanceID, "plugin_upload_save_failure")
+		return nil, fmt.Errorf("failed to save plugin state: %v", err)
+	}
+
+	// Clean up VM and network - no prewarm during upload, clean for next step
+	ps.cleanupPluginVM(plugin.Slug, instanceID, "plugin_upload_success")
+
 	ps.logger.WithFields(logger.Fields{
 		"plugin_slug": plugin.Slug,
 		"name":        metadata.Name,
 		"version":     metadata.Version,
-	}).Info("Plugin uploaded successfully")
+		"assigned_ip": plugin.AssignedIP,
+		"tap_device":  plugin.TapDevice,
+		"status":      plugin.Status,
+	}).Info("Plugin uploaded and installed successfully")
 
 	return plugin, nil
 }
@@ -232,7 +445,7 @@ func (ps *PluginService) DeletePlugin(slug string) error {
 }
 
 // ActivatePlugin activates a plugin and creates snapshot
-func (ps *PluginService) ActivatePlugin(slug string, vmService *VMService) (*models.Plugin, error) {
+func (ps *PluginService) ActivatePlugin(slug string) (*models.Plugin, error) {
 	ps.mutex.Lock()
 	defer ps.mutex.Unlock()
 
@@ -249,7 +462,7 @@ func (ps *PluginService) ActivatePlugin(slug string, vmService *VMService) (*mod
 	}
 
 	// If snapshot already exists, just mark as active and ensure network config
-	if vmService.HasSnapshot(slug) {
+	if ps.vmService.HasSnapshot(slug) {
 		ps.logger.WithFields(logger.Fields{
 			"plugin_slug": slug,
 		}).Info("Plugin has existing snapshot, marking as active")
@@ -280,7 +493,7 @@ func (ps *PluginService) ActivatePlugin(slug string, vmService *VMService) (*mod
 		"instance_id": instanceID,
 	}).Info("Creating VM for snapshot generation")
 
-	if err := vmService.StartVM(instanceID, plugin); err != nil {
+	if err := ps.vmService.StartVM(instanceID, plugin); err != nil {
 		ps.logger.WithFields(logger.Fields{
 			"plugin_slug": slug,
 			"error":       err,
@@ -289,7 +502,7 @@ func (ps *PluginService) ActivatePlugin(slug string, vmService *VMService) (*mod
 	}
 
 	// Get VM IP from static networking
-	vmIP, exists := vmService.GetVMIP(instanceID)
+	vmIP, exists := ps.vmService.GetVMIP(instanceID)
 	if !exists {
 		return nil, fmt.Errorf("failed to get VM IP after start")
 	}
@@ -302,19 +515,14 @@ func (ps *PluginService) ActivatePlugin(slug string, vmService *VMService) (*mod
 	// Allow extra time for VM boot and Python app initialization
 	time.Sleep(3 * time.Second)
 
-	// Use health check with retries instead of fixed wait time (much more efficient)
-	if err := ps.healthCheckWithRetries(vmIP, slug, 30, 500*time.Millisecond); err != nil {
-		ps.logger.WithFields(logger.Fields{
-			"plugin_slug": slug,
-			"attempts":    30,
-			"error":       err,
-		}).Error("VM health check failed during activation")
-		return nil, fmt.Errorf("plugin failed health check: %v", err)
+	// Perform health validation using centralized method
+	if err := ps.validatePluginHealth(plugin, instanceID, vmIP, "plugin_activation"); err != nil {
+		return nil, err
 	}
 
 	// Create snapshot for fast future execution (use full snapshot for first time)
-	snapshotPath := vmService.GetSnapshotPath(slug)
-	if err := vmService.CreateSnapshot(instanceID, snapshotPath, false); err != nil {
+	snapshotPath := ps.vmService.GetSnapshotPath(slug)
+	if err := ps.vmService.CreateSnapshot(instanceID, snapshotPath, false); err != nil {
 		ps.logger.WithFields(logger.Fields{
 			"plugin_slug": slug,
 			"error":       err,
@@ -330,30 +538,21 @@ func (ps *PluginService) ActivatePlugin(slug string, vmService *VMService) (*mod
 	}).Info("Pausing VM and adding to pre-warm pool")
 
 	// Pause the VM (keep it in memory for instant resume)
-	if err := vmService.PauseVM(instanceID); err != nil {
+	if err := ps.vmService.PauseVM(instanceID); err != nil {
 		ps.logger.WithFields(logger.Fields{
 			"plugin_slug": slug,
 			"error":       err,
 		}).Warn("Failed to pause VM, will stop it instead")
 		// Fallback: stop the VM if pause fails
-		if stopErr := vmService.StopVM(instanceID); stopErr != nil {
+		if stopErr := ps.vmService.StopVM(instanceID); stopErr != nil {
 			ps.logger.WithFields(logger.Fields{
 				"plugin_slug": slug,
 				"error":       stopErr,
 			}).Error("Failed to stop VM after pause failure")
 		}
 	} else {
-		// Add paused VM to pre-warm pool
-		prewarmInstance := &PrewarmInstance{
-			InstanceID:   instanceID,
-			Machine:      nil, // Will be retrieved from VM service when needed
-			IP:           vmIP,
-			TapName:      vmService.GetTapNameForPlugin(plugin.Slug),
-			CreatedAt:    time.Now(),
-			LastUsed:     time.Now(),
-			SnapshotType: "full",
-		}
-		vmService.AddToPrewarmPool(slug, prewarmInstance)
+		// VM is already in prewarm pool from StartVM
+		// No need to manually add it
 
 		ps.logger.WithFields(logger.Fields{
 			"plugin_slug": slug,
@@ -364,7 +563,7 @@ func (ps *PluginService) ActivatePlugin(slug string, vmService *VMService) (*mod
 
 	// Persist the assigned IP and TAP device for this plugin
 	plugin.AssignedIP = vmIP
-	plugin.TapDevice = vmService.GetTapNameForPlugin(plugin.Slug)
+	plugin.TapDevice = ps.vmService.GetTapNameForPlugin(plugin.Slug)
 
 	plugin.Status = "active"
 	plugin.UpdatedAt = time.Now()
@@ -384,7 +583,7 @@ func (ps *PluginService) ActivatePlugin(slug string, vmService *VMService) (*mod
 }
 
 // DeactivatePlugin deactivates a plugin and cleans up network resources
-func (ps *PluginService) DeactivatePlugin(slug string, vmService *VMService) (*models.Plugin, error) {
+func (ps *PluginService) DeactivatePlugin(slug string) (*models.Plugin, error) {
 	ps.mutex.Lock()
 	defer ps.mutex.Unlock()
 
@@ -400,8 +599,11 @@ func (ps *PluginService) DeactivatePlugin(slug string, vmService *VMService) (*m
 		return plugin, nil
 	}
 
+	// Remove from prewarm pool
+	ps.vmService.RemoveFromPrewarmPool(slug)
+
 	// Delete snapshot files
-	if err := vmService.DeleteSnapshot(slug); err != nil {
+	if err := ps.vmService.DeleteSnapshot(slug); err != nil {
 		ps.logger.WithFields(logger.Fields{
 			"plugin_slug": slug,
 			"error":       err,
@@ -477,7 +679,7 @@ func (ps *PluginService) ExecuteAction(actionHook string, payload map[string]int
 		startTime := time.Now()
 
 		// Try to get a pre-warmed instance from the pool
-		prewarmInstance := vmService.GetPrewarmInstance(plugin.Slug)
+		prewarmInstance := ps.vmService.GetPrewarmInstance(plugin.Slug)
 
 		var instanceID string
 		var vmIP string
@@ -494,7 +696,7 @@ func (ps *PluginService) ExecuteAction(actionHook string, payload map[string]int
 			}).Info("Using pre-warmed instance for ultra-fast execution")
 
 			// Resume the paused VM for execution
-			if err := vmService.ResumeVM(instanceID); err != nil {
+			if err := ps.vmService.ResumeVM(instanceID); err != nil {
 				ps.logger.WithFields(logger.Fields{
 					"plugin_slug": plugin.Slug,
 					"error":       err,
@@ -512,72 +714,35 @@ func (ps *PluginService) ExecuteAction(actionHook string, payload map[string]int
 			// Return VM to pool after execution
 			defer func(pluginSlug string, instance *PrewarmInstance) {
 				// Pause VM and return to pool
-				if pauseErr := vmService.PauseVM(instance.InstanceID); pauseErr != nil {
+				if pauseErr := ps.vmService.PauseVM(instance.InstanceID); pauseErr != nil {
 					ps.logger.WithFields(logger.Fields{
 						"instance_id": instance.InstanceID,
 						"error":       pauseErr,
 					}).Error("Failed to pause VM for pool return")
 				} else {
-					vmService.ReturnPrewarmInstance(pluginSlug, instance)
+					ps.vmService.ReturnPrewarmInstance(pluginSlug, instance)
 				}
 			}(plugin.Slug, prewarmInstance)
 
 		} else {
-			// Fallback: Resume VM from snapshot for execution
-			instanceID = fmt.Sprintf("%s-exec-%d", plugin.Slug, time.Now().UnixNano())
-
+			// No pre-warmed instance available - this should not happen for active plugins
+			// Active plugins should have pre-warmed instances created during CMS startup or plugin activation
 			ps.logger.WithFields(logger.Fields{
 				"plugin_slug": plugin.Slug,
-				"instance_id": instanceID,
 				"action_hook": actionHook,
-			}).Info("No pre-warmed instance available, resuming from snapshot")
+			}).Error("No pre-warmed instance available for active plugin - plugin may not be properly activated")
 
-			// Resume VM from snapshot for execution
-			if err := vmService.ResumeFromSnapshot(instanceID, plugin); err != nil {
-				ps.logger.WithFields(logger.Fields{
-					"plugin_slug": plugin.Slug,
-					"error":       err,
-				}).Error("Failed to resume VM from snapshot")
-
-				results = append(results, map[string]interface{}{
-					"plugin_slug":       plugin.Slug,
-					"success":           false,
-					"result":            map[string]interface{}{"error": fmt.Sprintf("Failed to resume VM: %v", err)},
-					"execution_time_ms": int(time.Since(startTime).Milliseconds()),
-				})
-				continue
-			}
-
-			// Get VM IP for making HTTP requests
-			var exists bool
-			vmIP, exists = vmService.GetVMIP(instanceID)
-			if !exists {
-				results = append(results, map[string]interface{}{
-					"plugin_slug":       plugin.Slug,
-					"success":           false,
-					"result":            map[string]interface{}{"error": "Failed to get VM IP"},
-					"execution_time_ms": int(time.Since(startTime).Milliseconds()),
-				})
-				continue
-			}
-
-			// Ensure VM cleanup for snapshot-based execution
-			defer func(instanceID string) {
-				if stopErr := vmService.StopVM(instanceID); stopErr != nil {
-					ps.logger.WithFields(logger.Fields{
-						"instance_id": instanceID,
-						"error":       stopErr,
-					}).Error("Failed to stop execution VM")
-				}
-			}(instanceID)
+			results = append(results, map[string]interface{}{
+				"plugin_slug":       plugin.Slug,
+				"success":           false,
+				"result":            map[string]interface{}{"error": "Plugin not ready - no pre-warmed instance available"},
+				"execution_time_ms": int(time.Since(startTime).Milliseconds()),
+			})
+			continue
 		}
 
 		// Brief wait for VM to be ready
-		if prewarmInstance != nil {
-			time.Sleep(10 * time.Millisecond) // Pre-warmed instances are almost instant
-		} else {
-			time.Sleep(100 * time.Millisecond) // Snapshot resume takes a bit longer
-		}
+		time.Sleep(10 * time.Millisecond)
 
 		// Find the appropriate action endpoint
 		var targetAction *models.PluginAction
@@ -656,33 +821,6 @@ func (ps *PluginService) ExecuteAction(actionHook string, payload map[string]int
 		"results":          results,
 		"timestamp":        time.Now(),
 	}, nil
-}
-
-// Helper methods
-
-func (ps *PluginService) executePluginAction(plugin *models.Plugin, action models.PluginAction, hook string, payload map[string]interface{}, vmService *VMService) models.ActionExecutionResult {
-	start := time.Now()
-	result := models.ActionExecutionResult{
-		PluginSlug: plugin.Slug,
-	}
-
-	// TODO: Implement actual VM execution logic
-	// For now, return a placeholder success result
-	result.Success = true
-	result.Result = map[string]interface{}{
-		"message": "Action execution not yet fully implemented",
-		"hook":    hook,
-		"payload": payload,
-	}
-	result.ExecutionTime = time.Since(start)
-
-	ps.logger.WithFields(logger.Fields{
-		"plugin_slug":       plugin.Slug,
-		"action_hook":       hook,
-		"execution_time_ms": result.ExecutionTime.Milliseconds(),
-	}).Info("Action executed (placeholder)")
-
-	return result
 }
 
 func (ps *PluginService) extractPluginZip(zipPath, destDir string) error {
@@ -911,6 +1049,86 @@ func (ps *PluginService) healthCheckWithRetries(vmIP, pluginSlug string, maxRetr
 	return fmt.Errorf("health check failed after %d attempts: %v", maxRetries, lastErr)
 }
 
+// validatePluginHealth performs comprehensive plugin health validation
+// This centralizes the health check logic used across different operations
+func (ps *PluginService) validatePluginHealth(plugin *models.Plugin, instanceID, vmIP string, context string) error {
+	ps.logger.WithFields(logger.Fields{
+		"plugin_slug": plugin.Slug,
+		"context":     context,
+		"vm_ip":       vmIP,
+	}).Info("Starting plugin health validation")
+
+	// VM is already in prewarm pool from StartVM
+	// No need to manually add it
+
+	// Perform health check
+	if err := ps.healthCheckWithRetries(vmIP, plugin.Slug, 30, 500*time.Millisecond); err != nil {
+		ps.logger.WithFields(logger.Fields{
+			"plugin_slug": plugin.Slug,
+			"context":     context,
+			"vm_ip":       vmIP,
+			"error":       err,
+		}).Error("Plugin health validation failed")
+
+		// Clean up VM and remove from prewarm pool
+		ps.vmService.RemoveFromPrewarmPool(plugin.Slug)
+		if stopErr := ps.vmService.StopVM(instanceID); stopErr != nil {
+			ps.logger.WithFields(logger.Fields{
+				"plugin_slug": plugin.Slug,
+				"error":       stopErr,
+			}).Error("Failed to stop VM after health validation failure")
+		}
+
+		// Mark plugin as failed
+		plugin.Status = "failed"
+		plugin.Health = models.PluginHealth{Status: "unhealthy", Message: err.Error()}
+		if saveErr := ps.savePluginsUnsafe(); saveErr != nil {
+			ps.logger.WithFields(logger.Fields{
+				"plugin_slug": plugin.Slug,
+				"error":       saveErr,
+			}).Error("Failed to save plugin failed state")
+		}
+
+		return fmt.Errorf("plugin failed health validation: %v", err)
+	}
+
+	// Health check passed - mark plugin as healthy
+	plugin.Health = models.PluginHealth{Status: "healthy", Message: "Plugin validated successfully"}
+
+	ps.logger.WithFields(logger.Fields{
+		"plugin_slug": plugin.Slug,
+		"context":     context,
+		"vm_ip":       vmIP,
+	}).Info("Plugin health validation completed successfully")
+
+	return nil
+}
+
+// cleanupPluginVM cleans up VM and network resources after plugin operations
+func (ps *PluginService) cleanupPluginVM(pluginSlug, instanceID string, context string) {
+	ps.logger.WithFields(logger.Fields{
+		"plugin_slug": pluginSlug,
+		"context":     context,
+	}).Info("Cleaning up VM and network resources")
+
+	// Remove from prewarm pool
+	ps.vmService.RemoveFromPrewarmPool(pluginSlug)
+
+	// Stop VM and clean up network resources
+	if err := ps.vmService.StopVM(instanceID); err != nil {
+		ps.logger.WithFields(logger.Fields{
+			"plugin_slug": pluginSlug,
+			"context":     context,
+			"error":       err,
+		}).Error("Failed to stop VM during cleanup")
+	} else {
+		ps.logger.WithFields(logger.Fields{
+			"plugin_slug": pluginSlug,
+			"context":     context,
+		}).Info("VM and network cleaned up successfully")
+	}
+}
+
 // makeHTTPRequest makes an HTTP request and returns the response as a map
 func (ps *PluginService) makeHTTPRequest(method, url string, body interface{}) (map[string]interface{}, error) {
 	client := &http.Client{Timeout: 10 * time.Second}
@@ -949,4 +1167,129 @@ func (ps *PluginService) makeHTTPRequest(method, url string, body interface{}) (
 	}
 
 	return result, nil
+}
+
+// restoreActivePlugins restores active plugins after CMS startup
+func (ps *PluginService) restoreActivePlugins() {
+	ps.logger.Info("Restoring active plugins after startup")
+
+	ps.mutex.RLock()
+	activePlugins := make([]*models.Plugin, 0)
+	for _, plugin := range ps.plugins {
+		if plugin.Status == "active" {
+			activePlugins = append(activePlugins, plugin)
+		}
+	}
+	ps.mutex.RUnlock()
+
+	if len(activePlugins) == 0 {
+		ps.logger.Info("No active plugins to restore")
+		return
+	}
+
+	ps.logger.WithFields(logger.Fields{
+		"active_count": len(activePlugins),
+	}).Info("Found active plugins to restore")
+
+	// Restore each active plugin
+	for _, plugin := range activePlugins {
+		ps.logger.WithFields(logger.Fields{
+			"plugin_slug": plugin.Slug,
+			"assigned_ip": plugin.AssignedIP,
+			"tap_device":  plugin.TapDevice,
+		}).Info("Restoring active plugin")
+
+		// Always use plugin slug as instance ID for consistency
+		instanceID := plugin.Slug
+
+		// Always start fresh VMs for active plugin restoration
+		// This ensures clean state and proper network initialization
+		ps.logger.WithFields(logger.Fields{
+			"plugin_slug": plugin.Slug,
+		}).Info("Starting fresh VM for active plugin restoration")
+
+		if err := ps.vmService.StartVM(instanceID, plugin); err != nil {
+			ps.logger.WithFields(logger.Fields{
+				"plugin_slug": plugin.Slug,
+				"error":       err,
+			}).Error("Failed to start VM for active plugin restoration")
+			continue
+		}
+
+		// Get VM IP
+		vmIP, exists := ps.vmService.GetVMIP(instanceID)
+		if !exists {
+			ps.logger.WithFields(logger.Fields{
+				"plugin_slug": plugin.Slug,
+				"instance_id": instanceID,
+			}).Error("Failed to get VM IP for active plugin restoration")
+			continue
+		}
+
+		// Perform health check to ensure VM is working properly
+		ps.logger.WithFields(logger.Fields{
+			"plugin_slug": plugin.Slug,
+			"vm_ip":       vmIP,
+		}).Info("Performing health check for active plugin restoration")
+
+		if err := ps.healthCheckWithRetries(vmIP, plugin.Slug, 15, 1*time.Second); err != nil {
+			ps.logger.WithFields(logger.Fields{
+				"plugin_slug": plugin.Slug,
+				"vm_ip":       vmIP,
+				"error":       err,
+			}).Error("Health check failed for active plugin restoration")
+			// Mark plugin as unhealthy but continue with restoration
+			plugin.Health = models.PluginHealth{Status: "unhealthy", Message: err.Error()}
+		} else {
+			ps.logger.WithFields(logger.Fields{
+				"plugin_slug": plugin.Slug,
+				"vm_ip":       vmIP,
+			}).Info("Health check passed for active plugin restoration")
+			// Mark plugin as healthy
+			plugin.Health = models.PluginHealth{Status: "healthy", Message: "Plugin restored successfully"}
+
+			// Create fresh snapshot for this plugin
+			ps.logger.WithFields(logger.Fields{
+				"plugin_slug": plugin.Slug,
+			}).Info("Creating fresh snapshot for active plugin")
+
+			snapshotPath := ps.vmService.GetSnapshotPath(plugin.Slug)
+			if err := ps.vmService.CreateSnapshot(instanceID, snapshotPath, false); err != nil {
+				ps.logger.WithFields(logger.Fields{
+					"plugin_slug": plugin.Slug,
+					"error":       err,
+				}).Error("Failed to create snapshot for active plugin restoration")
+				// Continue even if snapshot creation fails
+			} else {
+				ps.logger.WithFields(logger.Fields{
+					"plugin_slug": plugin.Slug,
+				}).Info("Successfully created fresh snapshot for active plugin")
+			}
+		}
+
+		// Pause the VM for pre-warming
+		if err := ps.vmService.PauseVM(instanceID); err != nil {
+			ps.logger.WithFields(logger.Fields{
+				"plugin_slug": plugin.Slug,
+				"error":       err,
+			}).Error("Failed to pause VM for active plugin restoration")
+			continue
+		}
+
+		// Save plugin health status and network configuration
+		if saveErr := ps.savePluginsUnsafe(); saveErr != nil {
+			ps.logger.WithFields(logger.Fields{
+				"plugin_slug": plugin.Slug,
+				"error":       saveErr,
+			}).Error("Failed to save plugin health status during startup")
+		}
+
+		ps.logger.WithFields(logger.Fields{
+			"plugin_slug": plugin.Slug,
+			"instance_id": instanceID,
+			"vm_ip":       vmIP,
+		}).Info("Successfully restored active plugin")
+	}
+
+	ps.logger.Info("Active plugin restoration completed")
 }

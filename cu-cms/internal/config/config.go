@@ -20,6 +20,10 @@ type Config struct {
 	Debug  bool   `json:"debug"`
 	LogDir string `json:"log_dir"`
 
+	// Mode configuration
+	Mode    string `json:"mode"`    // "development", "production", "test"
+	Verbose bool   `json:"verbose"` // Verbose logging
+
 	// Data directories
 	DataDir     string `json:"data_dir"`
 	PluginsDir  string `json:"plugins_dir"`
@@ -41,6 +45,10 @@ func NewConfig() *Config {
 		Host:   "0.0.0.0",
 		Debug:  false,
 		LogDir: "/app/data/logs",
+
+		// Mode defaults
+		Mode:    "production", // Default to production
+		Verbose: false,
 
 		// Data directories
 		DataDir:     "/app/data",
@@ -68,6 +76,14 @@ func (c *Config) LoadFromEnv() error {
 
 	if debug := os.Getenv("CMS_DEBUG"); debug == "true" || debug == "1" {
 		c.Debug = true
+	}
+
+	if mode := os.Getenv("CMS_MODE"); mode != "" {
+		c.Mode = mode
+	}
+
+	if verbose := os.Getenv("CMS_VERBOSE"); verbose == "true" || verbose == "1" {
+		c.Verbose = true
 	}
 
 	if dataDir := os.Getenv("CMS_DATA_DIR"); dataDir != "" {
@@ -132,4 +148,33 @@ func (c *Config) GetLogLevel() string {
 // IsDebugMode returns true if debug mode is enabled
 func (c *Config) IsDebugMode() bool {
 	return c.Debug
+}
+
+// IsDevelopmentMode returns true if running in development mode
+func (c *Config) IsDevelopmentMode() bool {
+	return c.Mode == "development" || c.Mode == "dev"
+}
+
+// IsProductionMode returns true if running in production mode
+func (c *Config) IsProductionMode() bool {
+	return c.Mode == "production" || c.Mode == "prod"
+}
+
+// IsTestMode returns true if running in test mode
+func (c *Config) IsTestMode() bool {
+	return c.Mode == "test"
+}
+
+// GetModeString returns a human-readable mode string
+func (c *Config) GetModeString() string {
+	switch c.Mode {
+	case "development", "dev":
+		return "development"
+	case "production", "prod":
+		return "production"
+	case "test":
+		return "test"
+	default:
+		return "production"
+	}
 }

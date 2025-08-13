@@ -57,7 +57,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Image: %s\n", cfg.GetImageName())
 	fmt.Printf("Port: %d\n", cfg.Port)
 	fmt.Printf("Data Directory: %s\n", cfg.DataDir)
-	fmt.Printf("Mode: %s\n", getModeString())
+	fmt.Printf("Mode: %s\n", cfg.GetModeString())
 
 	if status == "running" {
 		fmt.Printf("URL: http://localhost:%d\n", cfg.Port)
@@ -71,13 +71,4 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
-}
-
-func getModeString() string {
-	if cfg.TestMode {
-		return "test"
-	} else if cfg.DevMode {
-		return "development"
-	}
-	return "production"
 }

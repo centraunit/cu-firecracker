@@ -312,7 +312,7 @@ func (s *Server) handleActivatePlugin(w http.ResponseWriter, r *http.Request, sl
 		"plugin_slug": slug,
 	}).Debug("Handling activate plugin request")
 
-	plugin, err := s.pluginService.ActivatePlugin(slug, s.vmService)
+	plugin, err := s.pluginService.ActivatePlugin(slug)
 	if err != nil {
 		s.logger.WithFields(logger.Fields{
 			"plugin_slug": slug,
@@ -334,7 +334,7 @@ func (s *Server) handleDeactivatePlugin(w http.ResponseWriter, r *http.Request, 
 		"plugin_slug": slug,
 	}).Debug("Handling deactivate plugin request")
 
-	plugin, err := s.pluginService.DeactivatePlugin(slug, s.vmService)
+	plugin, err := s.pluginService.DeactivatePlugin(slug)
 	if err != nil {
 		s.logger.WithFields(logger.Fields{
 			"plugin_slug": slug,

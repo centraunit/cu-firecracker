@@ -29,11 +29,18 @@ type CMSService struct {
 
 // NewCMSService creates a new CMS service
 func NewCMSService(cfg *config.Config) (*CMSService, error) {
-	dockerClient, err := docker.NewClient()
+	// Use Docker configuration from config
+	dockerClient, err := docker.NewClientWithConfig(cfg.DockerHost)
 	if err != nil {
 		return nil, errors.Wrap(err, errors.ErrTypeDocker, "cms_service_init",
 			"failed to initialize Docker client")
 	}
+
+	// Log Docker configuration for debugging
+	logger.GetDefault().WithFields(logger.Fields{
+		"docker_host": cfg.DockerHost,
+		"mode":        cfg.GetModeString(),
+	}).Debug("Initialized Docker client with configuration")
 
 	return &CMSService{
 		config:       cfg,
@@ -50,7 +57,7 @@ func (s *CMSService) Close() error {
 // Start starts the CMS container
 func (s *CMSService) Start(ctx context.Context) error {
 	s.logger.WithFields(logger.Fields{
-		"mode": s.getModeString(),
+		"mode": s.config.GetModeString(),
 		"port": s.config.Port,
 	}).Info("Starting CMS container")
 
@@ -80,6 +87,9 @@ func (s *CMSService) Start(ctx context.Context) error {
 		Cmd:   []string{"./cms"},
 		Env: []string{
 			fmt.Sprintf("CMS_PORT=%d", s.config.Port),
+			fmt.Sprintf("CMS_MODE=%s", s.config.GetModeString()),
+			fmt.Sprintf("CMS_DEBUG=%t", s.config.Debug),
+			fmt.Sprintf("CMS_VERBOSE=%t", s.config.Verbose),
 		},
 		Mounts: []docker.MountConfig{
 			{Source: absDataDir, Target: "/app/data", Type: "bind"},
@@ -254,16 +264,6 @@ func (s *CMSService) runIntegrationTests(ctx context.Context) error {
 	// This is a placeholder for the integration test logic
 
 	return nil
-}
-
-// getModeString returns a human-readable string for the current mode
-func (s *CMSService) getModeString() string {
-	if s.config.TestMode {
-		return "test"
-	} else if s.config.DevMode {
-		return "development"
-	}
-	return "production"
 }
 
 // createDir creates a directory with proper error handling
