@@ -9,7 +9,7 @@ package services
 import (
 	"context"
 	"crypto/md5"
-	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -22,11 +22,10 @@ import (
 	firecracker "github.com/firecracker-microvm/firecracker-go-sdk"
 	"github.com/firecracker-microvm/firecracker-go-sdk/client/models"
 
-	"math/rand"
-
 	"github.com/centraunit/cu-firecracker-cms/internal/config"
 	"github.com/centraunit/cu-firecracker-cms/internal/logger"
 	cms_models "github.com/centraunit/cu-firecracker-cms/internal/models"
+	"github.com/sirupsen/logrus"
 )
 
 // VMService handles Firecracker microVM operations
@@ -36,18 +35,31 @@ type VMService struct {
 	firecrackerPath string
 	kernelPath      string
 	snapshotDir     string
-	instances       map[string]*firecracker.Machine // instanceID -> machine
-	vms             map[string]*firecracker.Machine // Alias for backwards compatibility
-	ips             map[string]string               // Alias for backwards compatibility
-	ipPool          map[string]string               // instanceID -> IP
-	usedIPs         map[string]bool                 // Track used IPs
-	nextIP          int                             // Next available IP (2-254)
-	mutex           sync.RWMutex
+
+	// VM instances with metadata for efficient IP tracking
+	vms               map[string]*VMInstance // instanceID -> VM instance with metadata
+	vmMutex           sync.RWMutex
+	firecrackerLogger *logrus.Entry
 
 	// Pre-warming pool for ultra-fast plugin execution
 	prewarmPool map[string][]*PrewarmInstance // pluginSlug -> pool of ready instances
 	poolMutex   sync.RWMutex
 	maxPoolSize int // Maximum instances per plugin in pool
+
+	// IP allocation for static networking
+	ipPool      map[string]bool // IP -> allocated status
+	ipPoolMutex sync.RWMutex
+	nextIP      net.IP // Next IP to allocate
+}
+
+// VMInstance represents a running VM with metadata
+type VMInstance struct {
+	Machine    *firecracker.Machine
+	SocketPath string
+	InstanceID string
+	PluginSlug string
+	IP         string
+	CreatedAt  time.Time
 }
 
 // PrewarmInstance represents a pre-warmed VM instance ready for immediate use
@@ -80,24 +92,31 @@ func NewVMService(cfg *config.Config) (*VMService, error) {
 	}
 
 	service := &VMService{
-		config:          cfg,
-		logger:          logger.GetDefault(),
-		firecrackerPath: firecrackerPath,
-		kernelPath:      kernelPath,
-		snapshotDir:     snapshotDir,
-		instances:       make(map[string]*firecracker.Machine),
-		vms:             make(map[string]*firecracker.Machine),
-		ips:             make(map[string]string),
-		ipPool:          make(map[string]string),
-		usedIPs:         make(map[string]bool),
-		nextIP:          2, // Start from 192.168.127.2
-		prewarmPool:     make(map[string][]*PrewarmInstance),
-		maxPoolSize:     cfg.PrewarmPoolSize, // Use configurable pool size
+		config:            cfg,
+		logger:            logger.GetDefault(),
+		firecrackerPath:   firecrackerPath,
+		kernelPath:        kernelPath,
+		snapshotDir:       snapshotDir,
+		vms:               make(map[string]*VMInstance),
+		vmMutex:           sync.RWMutex{},
+		firecrackerLogger: logger.GetDefault().WithComponent("firecracker"),
+		prewarmPool:       make(map[string][]*PrewarmInstance),
+		maxPoolSize:       cfg.PrewarmPoolSize, // Use configurable pool size
+		ipPool:            make(map[string]bool),
+		ipPoolMutex:       sync.RWMutex{},
+		nextIP:            net.ParseIP("192.168.127.2"), // Start from 192.168.127.2
 	}
 
 	// Initialize snapshot directory
 	if err := service.initSnapshotDir(); err != nil {
 		return nil, fmt.Errorf("failed to initialize snapshot directory: %v", err)
+	}
+
+	// Load existing IP assignments from plugin registry
+	if err := service.loadExistingIPAssignments(); err != nil {
+		service.logger.WithFields(logger.Fields{
+			"error": err,
+		}).Warn("Failed to load existing IP assignments, continuing with fresh pool")
 	}
 
 	// Start pre-warming background process
@@ -225,6 +244,39 @@ func (vm *VMService) ReturnPrewarmInstance(pluginSlug string, instance *PrewarmI
 	}).Debug("Returned instance to pre-warm pool")
 }
 
+// AddToPrewarmPool adds an instance to the pre-warm pool
+func (vm *VMService) AddToPrewarmPool(pluginSlug string, instance *PrewarmInstance) {
+	vm.poolMutex.Lock()
+	defer vm.poolMutex.Unlock()
+
+	// Check if pool is at capacity
+	pool := vm.prewarmPool[pluginSlug]
+	if len(pool) >= vm.maxPoolSize {
+		// Pool full, stop this instance
+		vm.logger.WithFields(logger.Fields{
+			"plugin_slug": pluginSlug,
+			"instance_id": instance.InstanceID,
+		}).Debug("Pool full, stopping instance")
+
+		if err := vm.StopVM(instance.InstanceID); err != nil {
+			vm.logger.WithFields(logger.Fields{
+				"instance_id": instance.InstanceID,
+				"error":       err,
+			}).Error("Failed to stop excess pre-warm instance")
+		}
+		return
+	}
+
+	// Add to pool
+	vm.prewarmPool[pluginSlug] = append(pool, instance)
+
+	vm.logger.WithFields(logger.Fields{
+		"plugin_slug": pluginSlug,
+		"instance_id": instance.InstanceID,
+		"pool_size":   len(vm.prewarmPool[pluginSlug]),
+	}).Info("Added instance to pre-warm pool")
+}
+
 // CreateDifferentialSnapshot creates a differential snapshot from the base snapshot
 func (vm *VMService) CreateDifferentialSnapshot(instanceID, pluginSlug string) error {
 	vm.logger.WithFields(logger.Fields{
@@ -265,40 +317,54 @@ func (vm *VMService) StartVM(instanceID string, plugin *cms_models.Plugin) error
 	vm.logger.WithFields(logger.Fields{
 		"instance_id": instanceID,
 		"plugin_slug": plugin.Slug,
-	}).Info("Starting VM")
+	}).Info("Starting VM with CNI networking")
 
-	// Clean up any existing socket file before starting
-	socketPath := fmt.Sprintf("/tmp/firecracker-%s.sock", instanceID)
-	if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) {
-		vm.logger.WithFields(logger.Fields{
-			"instance_id": instanceID,
-			"socket":      socketPath,
-		}).Debug("Failed to remove existing socket, continuing anyway")
-	}
-
-	// Allocate IP for this instance
-	vmIP, err := vm.allocateIP(instanceID)
+	// Get or create TAP interface for this plugin
+	tapName, err := vm.createTapInterface(plugin.Slug, instanceID)
 	if err != nil {
-		return fmt.Errorf("failed to allocate IP for instance %s: %v", instanceID, err)
+		return fmt.Errorf("failed to create TAP interface: %v", err)
 	}
 
-	// Create network interface with short name (Linux limit: 15 chars)
-	tapName := vm.generateTapName(instanceID)
-
-	// Setup network interface
-	if err := vm.setupNetworkInterface(tapName, vmIP); err != nil {
-		vm.deallocateIP(instanceID)
-		return fmt.Errorf("failed to setup network interface: %v", err)
+	// Get or allocate IP for this plugin
+	var allocatedIP string
+	if plugin.AssignedIP != "" {
+		// Use existing assigned IP
+		allocatedIP = plugin.AssignedIP
+		vm.logger.WithFields(logger.Fields{
+			"plugin_slug": plugin.Slug,
+			"assigned_ip": allocatedIP,
+		}).Info("Using existing assigned IP")
+	} else {
+		// Allocate new IP
+		allocatedIP = vm.allocateIP()
+		if allocatedIP == "" {
+			return fmt.Errorf("failed to allocate IP for VM")
+		}
+		vm.logger.WithFields(logger.Fields{
+			"plugin_slug":  plugin.Slug,
+			"allocated_ip": allocatedIP,
+		}).Info("Allocated new IP")
 	}
 
-	// Convert to structured logger compatible with Firecracker SDK
-	firecrackerLogger := vm.logger.WithComponent("firecracker")
+	// Create socket path for this VM instance
+	socketPath := filepath.Join("/tmp/firecracker", fmt.Sprintf("%s.sock", instanceID))
 
-	// Create machine configuration
+	// Ensure socket directory exists
+	if err := os.MkdirAll(filepath.Dir(socketPath), 0755); err != nil {
+		if plugin.AssignedIP == "" {
+			vm.deallocateIP(allocatedIP) // Only clean up if we allocated new IP
+		}
+		return fmt.Errorf("failed to create socket directory: %v", err)
+	}
+
+	// Configure kernel arguments with static IP
+	kernelArgs := fmt.Sprintf("console=ttyS0 reboot=k panic=1 pci=off ip=%s::192.168.127.1:255.255.255.0::eth0:off", allocatedIP)
+
+	// Create machine configuration with static networking
 	cfg := firecracker.Config{
 		SocketPath:      socketPath,
 		KernelImagePath: vm.kernelPath,
-		KernelArgs:      "console=ttyS0 reboot=k panic=1 pci=off",
+		KernelArgs:      kernelArgs,
 		Drives: []models.Drive{{
 			DriveID:      firecracker.String("rootfs"),
 			IsRootDevice: firecracker.Bool(true),
@@ -306,68 +372,56 @@ func (vm *VMService) StartVM(instanceID string, plugin *cms_models.Plugin) error
 			PathOnHost:   firecracker.String(plugin.RootfsPath),
 		}},
 		MachineCfg: models.MachineConfiguration{
-			VcpuCount:  firecracker.Int64(1),
-			MemSizeMib: firecracker.Int64(512),
-			// Enable dirty page tracking for differential snapshots
-			TrackDirtyPages: true,
+			VcpuCount:       firecracker.Int64(1),
+			MemSizeMib:      firecracker.Int64(512),
+			TrackDirtyPages: true, // Enable dirty page tracking for differential snapshots
 		},
 		NetworkInterfaces: []firecracker.NetworkInterface{{
 			StaticConfiguration: &firecracker.StaticNetworkConfiguration{
-				MacAddress:  "02:FC:00:00:03:04",
-				HostDevName: tapName,
-				IPConfiguration: &firecracker.IPConfiguration{
-					IPAddr: net.IPNet{
-						IP:   net.ParseIP(vmIP),
-						Mask: net.CIDRMask(24, 32),
-					},
-					Gateway:     net.ParseIP("192.168.127.1"),
-					Nameservers: []string{"8.8.8.8"},
-				},
+				HostDevName: tapName, // Use the created TAP interface
+				MacAddress:  "02:FC:00:00:00:01",
 			},
 		}},
+		VMID: plugin.Slug, // Use plugin name as VMID
 	}
 
-	// Create machine with logger
-	machine, err := firecracker.NewMachine(
-		context.Background(),
-		cfg,
-		firecracker.WithLogger(firecrackerLogger),
-	)
+	// Create Firecracker machine
+	machine, err := firecracker.NewMachine(context.Background(), cfg, firecracker.WithLogger(vm.firecrackerLogger))
 	if err != nil {
-		vm.deallocateIP(instanceID)
-		vm.cleanupNetworkInterface(tapName, vmIP, instanceID)
-		os.Remove(socketPath) // Clean up socket on failure
 		return fmt.Errorf("failed to create machine: %v", err)
 	}
 
 	// Start the machine
 	if err := machine.Start(context.Background()); err != nil {
-		vm.deallocateIP(instanceID)
-		vm.cleanupNetworkInterface(tapName, vmIP, instanceID)
-		os.Remove(socketPath) // Clean up socket on failure
 		return fmt.Errorf("failed to start machine: %v", err)
 	}
 
-	// Store the machine instance
-	vm.mutex.Lock()
-	vm.instances[instanceID] = machine
-	vm.ipPool[instanceID] = vmIP
-	vm.mutex.Unlock()
+	// Store VM instance in tracking with allocated IP
+	vm.vmMutex.Lock()
+	vm.vms[instanceID] = &VMInstance{
+		Machine:    machine,
+		SocketPath: socketPath,
+		InstanceID: instanceID,
+		PluginSlug: plugin.Slug,
+		IP:         allocatedIP,
+		CreatedAt:  time.Now(),
+	}
+	vm.vmMutex.Unlock()
 
 	vm.logger.WithFields(logger.Fields{
+		"plugin_slug": plugin.Slug,
 		"instance_id": instanceID,
-		"ip":          vmIP,
-	}).Info("VM started successfully")
+		"assigned_ip": allocatedIP,
+	}).Info("VM started successfully with static networking")
 
 	return nil
 }
 
 // StopVM stops and cleans up a VM instance
 func (vm *VMService) StopVM(instanceID string) error {
-	vm.mutex.RLock()
-	machine, exists := vm.instances[instanceID]
-	vmIP := vm.ipPool[instanceID]
-	vm.mutex.RUnlock()
+	vm.vmMutex.RLock()
+	vmInstance, exists := vm.vms[instanceID]
+	vm.vmMutex.RUnlock()
 
 	if !exists {
 		vm.logger.WithFields(logger.Fields{
@@ -381,14 +435,14 @@ func (vm *VMService) StopVM(instanceID string) error {
 	}).Info("Stopping VM")
 
 	// Stop the Firecracker machine
-	if err := machine.Shutdown(context.Background()); err != nil {
+	if err := vmInstance.Machine.Shutdown(context.Background()); err != nil {
 		vm.logger.WithFields(logger.Fields{
 			"instance_id": instanceID,
 			"error":       err,
 		}).Error("Failed to shutdown machine gracefully, attempting force kill")
 
 		// Force kill if graceful shutdown fails
-		if killErr := machine.StopVMM(); killErr != nil {
+		if killErr := vmInstance.Machine.StopVMM(); killErr != nil {
 			vm.logger.WithFields(logger.Fields{
 				"instance_id": instanceID,
 				"error":       killErr,
@@ -396,35 +450,15 @@ func (vm *VMService) StopVM(instanceID string) error {
 		}
 	}
 
-	// For execution instances (temporary), clean up TAP device
-	// For plugin activation (persistent), keep TAP for reuse
-	shouldCleanupTap := strings.Contains(instanceID, "-exec-")
-
-	if shouldCleanupTap {
-		// This is a temporary execution instance - cleanup everything
-		tapName := vm.generateTapName(instanceID)
-		vm.cleanupNetworkInterface(tapName, vmIP, instanceID)
-
-		vm.logger.WithFields(logger.Fields{
-			"instance_id": instanceID,
-			"tap_name":    tapName,
-		}).Debug("Cleaned up execution VM TAP interface")
-	} else {
-		// This is a plugin activation VM - keep TAP for reuse, just deallocate IP
-		vm.deallocateIP(instanceID)
-
-		vm.logger.WithFields(logger.Fields{
-			"instance_id": instanceID,
-		}).Debug("Preserved TAP interface for plugin reuse")
+	// Deallocate IP before removing from tracking
+	if vmInstance.IP != "" {
+		vm.deallocateIP(vmInstance.IP)
 	}
 
 	// Remove from tracking maps
-	vm.mutex.Lock()
-	delete(vm.instances, instanceID)
+	vm.vmMutex.Lock()
 	delete(vm.vms, instanceID)
-	delete(vm.ips, instanceID)
-	delete(vm.ipPool, instanceID)
-	vm.mutex.Unlock()
+	vm.vmMutex.Unlock()
 
 	vm.logger.WithFields(logger.Fields{
 		"instance_id": instanceID,
@@ -433,18 +467,81 @@ func (vm *VMService) StopVM(instanceID string) error {
 	return nil
 }
 
+// PauseVM pauses a VM instance (keeps it in memory for instant resume)
+func (vm *VMService) PauseVM(instanceID string) error {
+	vm.vmMutex.RLock()
+	vmInstance, exists := vm.vms[instanceID]
+	vm.vmMutex.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("VM instance %s not found", instanceID)
+	}
+
+	vm.logger.WithFields(logger.Fields{
+		"instance_id": instanceID,
+	}).Info("Pausing VM for pre-warming")
+
+	// Pause the Firecracker machine
+	if err := vmInstance.Machine.PauseVM(context.Background()); err != nil {
+		vm.logger.WithFields(logger.Fields{
+			"instance_id": instanceID,
+			"error":       err,
+		}).Error("Failed to pause VM")
+		return fmt.Errorf("failed to pause VM: %v", err)
+	}
+
+	vm.logger.WithFields(logger.Fields{
+		"instance_id": instanceID,
+	}).Info("VM paused successfully for pre-warming")
+
+	return nil
+}
+
+// ResumeVM resumes a paused VM instance
+func (vm *VMService) ResumeVM(instanceID string) error {
+	vm.vmMutex.RLock()
+	vmInstance, exists := vm.vms[instanceID]
+	vm.vmMutex.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("VM instance %s not found", instanceID)
+	}
+
+	vm.logger.WithFields(logger.Fields{
+		"instance_id": instanceID,
+	}).Info("Resuming paused VM")
+
+	// Resume the Firecracker machine
+	if err := vmInstance.Machine.ResumeVM(context.Background()); err != nil {
+		vm.logger.WithFields(logger.Fields{
+			"instance_id": instanceID,
+			"error":       err,
+		}).Error("Failed to resume VM")
+		return fmt.Errorf("failed to resume VM: %v", err)
+	}
+
+	vm.logger.WithFields(logger.Fields{
+		"instance_id": instanceID,
+	}).Info("VM resumed successfully")
+
+	return nil
+}
+
 // CreateSnapshot creates a snapshot of the running VM
 func (vm *VMService) CreateSnapshot(instanceID, snapshotDir string, useDifferential bool) error {
+	vm.vmMutex.RLock()
+	vmInstance, exists := vm.vms[instanceID]
+	vm.vmMutex.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("VM instance %s not found", instanceID)
+	}
+
 	vm.logger.WithFields(logger.Fields{
 		"instance_id":      instanceID,
 		"snapshot_dir":     snapshotDir,
 		"use_differential": useDifferential,
 	}).Info("Creating VM snapshot")
-
-	vmInstance, exists := vm.instances[instanceID]
-	if !exists {
-		return fmt.Errorf("VM instance %s not found", instanceID)
-	}
 
 	// Define snapshot file paths
 	memPath := filepath.Join(snapshotDir, "snapshot.mem")
@@ -465,13 +562,13 @@ func (vm *VMService) CreateSnapshot(instanceID, snapshotDir string, useDifferent
 		"instance_id": instanceID,
 	}).Debug("Pausing VM for snapshot creation")
 
-	if err := vmInstance.PauseVM(context.Background()); err != nil {
+	if err := vmInstance.Machine.PauseVM(context.Background()); err != nil {
 		return fmt.Errorf("failed to pause VM: %v", err)
 	}
 
 	// Ensure VM is resumed after snapshot creation
 	defer func() {
-		if err := vmInstance.ResumeVM(context.Background()); err != nil {
+		if err := vmInstance.Machine.ResumeVM(context.Background()); err != nil {
 			vm.logger.WithFields(logger.Fields{
 				"instance_id": instanceID,
 				"error":       err,
@@ -480,7 +577,7 @@ func (vm *VMService) CreateSnapshot(instanceID, snapshotDir string, useDifferent
 	}()
 
 	// Create snapshot using the correct Firecracker SDK API
-	err := vmInstance.CreateSnapshot(context.Background(), memPath, statePath)
+	err := vmInstance.Machine.CreateSnapshot(context.Background(), memPath, statePath)
 	if err != nil {
 		vm.logger.WithFields(logger.Fields{
 			"instance_id": instanceID,
@@ -504,7 +601,7 @@ func (vm *VMService) ResumeFromSnapshot(instanceID string, plugin *cms_models.Pl
 	vm.logger.WithFields(logger.Fields{
 		"instance_id": instanceID,
 		"plugin_slug": plugin.Slug,
-	}).Info("Resuming VM from snapshot")
+	}).Info("Resuming VM from snapshot with static networking")
 
 	snapshotDir := vm.GetSnapshotPath(plugin.Slug)
 	memPath := filepath.Join(snapshotDir, "snapshot.mem")
@@ -515,60 +612,41 @@ func (vm *VMService) ResumeFromSnapshot(instanceID string, plugin *cms_models.Pl
 		return fmt.Errorf("snapshot not found for plugin %s", plugin.Slug)
 	}
 
-	// Use plugin's assigned network configuration or allocate new
-	var vmIP, tapName string
-	var err error
-
-	if plugin.AssignedIP != "" && plugin.TapDevice != "" {
-		// Reuse existing network configuration
-		vmIP = plugin.AssignedIP
-		tapName = plugin.TapDevice
-
-		vm.logger.WithFields(logger.Fields{
-			"plugin_slug": plugin.Slug,
-			"assigned_ip": vmIP,
-			"tap_device":  tapName,
-		}).Info("Reusing plugin's assigned network configuration")
-	} else {
-		// Allocate new network configuration
-		vmIP, err = vm.allocateIP(instanceID)
-		if err != nil {
-			return fmt.Errorf("failed to allocate IP: %v", err)
-		}
-		tapName = vm.generatePluginTapName(plugin.Slug)
-
-		vm.logger.WithFields(logger.Fields{
-			"plugin_slug": plugin.Slug,
-			"new_ip":      vmIP,
-			"new_tap":     tapName,
-		}).Info("Allocated new network configuration for plugin")
+	// Get or create TAP interface for this plugin
+	tapName, err := vm.createTapInterface(plugin.Slug, instanceID)
+	if err != nil {
+		return fmt.Errorf("failed to create TAP interface: %v", err)
 	}
 
-	// Check if TAP device exists, create if needed
-	tapExists := vm.checkTapExists(tapName)
-	if !tapExists {
-		if err := vm.setupNetworkInterface(tapName, vmIP); err != nil {
-			if plugin.AssignedIP == "" {
-				vm.deallocateIP(instanceID)
-			}
-			return fmt.Errorf("failed to setup network: %v", err)
+	// Get or allocate IP for this plugin
+	var allocatedIP string
+	if plugin.AssignedIP != "" {
+		// Use existing assigned IP
+		allocatedIP = plugin.AssignedIP
+		vm.logger.WithFields(logger.Fields{
+			"plugin_slug": plugin.Slug,
+			"assigned_ip": allocatedIP,
+		}).Info("Using existing assigned IP for snapshot resume")
+	} else {
+		// Allocate new IP
+		allocatedIP = vm.allocateIP()
+		if allocatedIP == "" {
+			return fmt.Errorf("failed to allocate IP for VM")
 		}
 		vm.logger.WithFields(logger.Fields{
-			"tap_name": tapName,
-			"vm_ip":    vmIP,
-		}).Info("Created TAP device for plugin")
-	} else {
-		vm.logger.WithFields(logger.Fields{
-			"tap_name": tapName,
-			"vm_ip":    vmIP,
-		}).Info("Reusing existing TAP device")
+			"plugin_slug":  plugin.Slug,
+			"allocated_ip": allocatedIP,
+		}).Info("Allocated new IP for snapshot resume")
 	}
 
-	// Create machine configuration with snapshot
+	// Configure kernel arguments with static IP
+	kernelArgs := fmt.Sprintf("console=ttyS0 reboot=k panic=1 pci=off ip=%s::192.168.127.1:255.255.255.0::eth0:off", allocatedIP)
+
+	// Create machine configuration with static networking and snapshot
 	cfg := firecracker.Config{
 		SocketPath:      fmt.Sprintf("/tmp/firecracker/%s.sock", instanceID),
 		KernelImagePath: vm.kernelPath,
-		KernelArgs:      "console=ttyS0 reboot=k panic=1 pci=off",
+		KernelArgs:      kernelArgs,
 		Drives: []models.Drive{{
 			DriveID:      firecracker.String("rootfs"),
 			PathOnHost:   firecracker.String(plugin.RootfsPath),
@@ -577,16 +655,8 @@ func (vm *VMService) ResumeFromSnapshot(instanceID string, plugin *cms_models.Pl
 		}},
 		NetworkInterfaces: []firecracker.NetworkInterface{{
 			StaticConfiguration: &firecracker.StaticNetworkConfiguration{
-				MacAddress:  "AA:FC:00:00:00:01",
-				HostDevName: tapName,
-				IPConfiguration: &firecracker.IPConfiguration{
-					IPAddr: net.IPNet{
-						IP:   net.ParseIP(vmIP),
-						Mask: net.CIDRMask(24, 32),
-					},
-					Gateway:     net.ParseIP("192.168.127.1"),
-					Nameservers: []string{"8.8.8.8"},
-				},
+				HostDevName: tapName, // Use the created TAP interface
+				MacAddress:  "02:FC:00:00:00:01",
 			},
 		}},
 		MachineCfg: models.MachineConfiguration{
@@ -595,6 +665,7 @@ func (vm *VMService) ResumeFromSnapshot(instanceID string, plugin *cms_models.Pl
 			TrackDirtyPages: true, // Enable for differential snapshots
 		},
 		LogLevel: "Info",
+		VMID:     plugin.Slug, // Use plugin name as VMID
 	}
 
 	// Create Firecracker logger
@@ -603,7 +674,7 @@ func (vm *VMService) ResumeFromSnapshot(instanceID string, plugin *cms_models.Pl
 		"instance_id": instanceID,
 	})
 
-	// Create machine with snapshot
+	// Create machine with snapshot and static networking
 	machine, err := firecracker.NewMachine(
 		context.Background(),
 		cfg,
@@ -611,38 +682,33 @@ func (vm *VMService) ResumeFromSnapshot(instanceID string, plugin *cms_models.Pl
 		firecracker.WithSnapshot(memPath, statePath),
 	)
 	if err != nil {
-		if !tapExists {
-			vm.cleanupNetworkInterface(tapName, vmIP, instanceID)
-		} else if plugin.AssignedIP == "" {
-			vm.deallocateIP(instanceID)
-		}
 		return fmt.Errorf("failed to create machine from snapshot: %v", err)
 	}
 
-	// Start the machine (this will resume from snapshot)
+	// Start the machine (this will resume from snapshot and setup static networking)
 	if err := machine.Start(context.Background()); err != nil {
-		if !tapExists {
-			vm.cleanupNetworkInterface(tapName, vmIP, instanceID)
-		} else if plugin.AssignedIP == "" {
-			vm.deallocateIP(instanceID)
-		}
 		return fmt.Errorf("failed to start machine from snapshot: %v", err)
 	}
 
-	// Store the VM instance
-	vm.mutex.Lock()
-	vm.instances[instanceID] = machine
-	vm.vms[instanceID] = machine
-	vm.ips[instanceID] = vmIP
-	vm.ipPool[instanceID] = vmIP
-	vm.mutex.Unlock()
+	// Store VM instance in tracking with allocated IP
+	vm.vmMutex.Lock()
+	vm.vms[instanceID] = &VMInstance{
+		Machine:    machine,
+		SocketPath: fmt.Sprintf("/tmp/firecracker/%s.sock", instanceID),
+		InstanceID: instanceID,
+		PluginSlug: plugin.Slug,
+		IP:         allocatedIP,
+		CreatedAt:  time.Now(),
+	}
+	vm.vmMutex.Unlock()
 
 	vm.logger.WithFields(logger.Fields{
 		"instance_id": instanceID,
 		"plugin_slug": plugin.Slug,
-		"vm_ip":       vmIP,
+		"ip":          allocatedIP,
 		"tap_name":    tapName,
-	}).Info("VM resumed from snapshot successfully")
+		"networking":  "static",
+	}).Info("VM resumed from snapshot successfully with static networking")
 
 	return nil
 }
@@ -735,20 +801,23 @@ func (vm *VMService) DeleteSnapshot(pluginSlug string) error {
 
 // GetVMIP returns the allocated IP for an instance
 func (vm *VMService) GetVMIP(instanceID string) (string, bool) {
-	vm.mutex.RLock()
-	defer vm.mutex.RUnlock()
+	vm.vmMutex.RLock()
+	defer vm.vmMutex.RUnlock()
 
-	ip, exists := vm.ipPool[instanceID]
-	return ip, exists
+	vmInstance, exists := vm.vms[instanceID]
+	if !exists {
+		return "", false
+	}
+	return vmInstance.IP, true
 }
 
 // ListVMs returns a list of running VM instance IDs
 func (vm *VMService) ListVMs() []string {
-	vm.mutex.RLock()
-	defer vm.mutex.RUnlock()
+	vm.vmMutex.RLock()
+	defer vm.vmMutex.RUnlock()
 
-	instanceIDs := make([]string, 0, len(vm.instances))
-	for instanceID := range vm.instances {
+	instanceIDs := make([]string, 0, len(vm.vms))
+	for instanceID := range vm.vms {
 		instanceIDs = append(instanceIDs, instanceID)
 	}
 
@@ -762,286 +831,248 @@ func (vm *VMService) ListVMs() []string {
 
 // Shutdown gracefully shuts down the VM service
 func (vm *VMService) Shutdown(ctx context.Context) {
-	vm.mutex.Lock()
-	defer vm.mutex.Unlock()
+	vm.vmMutex.Lock()
+	defer vm.vmMutex.Unlock()
 
 	vm.logger.WithFields(logger.Fields{
-		"count": len(vm.instances),
+		"count": len(vm.vms),
 	}).Info("Stopping all running VMs")
 
-	for instanceID, machine := range vm.instances {
+	for instanceID, vmInstance := range vm.vms {
 		vm.logger.WithFields(logger.Fields{
 			"instance_id": instanceID,
 		}).Debug("Stopping VM")
 
 		// Attempt graceful shutdown first
-		if err := machine.Shutdown(ctx); err != nil {
+		if err := vmInstance.Machine.Shutdown(ctx); err != nil {
 			vm.logger.WithFields(logger.Fields{
 				"instance_id": instanceID,
 				"error":       err,
 			}).Warn("Graceful shutdown failed, forcing stop")
 			// Force stop if graceful shutdown fails
-			machine.StopVMM()
+			vmInstance.Machine.StopVMM()
 		}
 
-		// Clean up IP allocation
-		vm.deallocateIP(instanceID)
+		// CNI handles network cleanup automatically
+		vm.logger.WithFields(logger.Fields{
+			"instance_id": instanceID,
+		}).Debug("CNI handles network cleanup automatically")
 	}
 
 	// Clear all instances
-	vm.instances = make(map[string]*firecracker.Machine)
+	vm.vms = make(map[string]*VMInstance)
 
 	vm.logger.Info("All VMs stopped successfully")
 }
 
 // Helper functions
 
-// allocateIP allocates a unique IP address for a VM instance
-func (vm *VMService) allocateIP(instanceID string) (string, error) {
-	vm.mutex.Lock()
-	defer vm.mutex.Unlock()
-
-	// Check if this instance already has an IP
-	if ip, exists := vm.ipPool[instanceID]; exists {
-		vm.logger.WithFields(logger.Fields{
-			"instance_id": instanceID,
-			"ip":          ip,
-		}).Debug("IP already allocated")
-		return ip, nil
-	}
-
-	// Find next available IP
-	for ip := vm.nextIP; ip < 255; ip++ {
-		ipStr := fmt.Sprintf("192.168.127.%d", ip)
-		if !vm.usedIPs[ipStr] {
-			vm.usedIPs[ipStr] = true
-			vm.ipPool[instanceID] = ipStr
-			vm.nextIP = ip + 1
-			if vm.nextIP <= 2 || vm.nextIP >= 254 {
-				vm.nextIP = 2 // Wrap around
-			}
-			vm.logger.WithFields(logger.Fields{
-				"instance_id": instanceID,
-				"ip":          ipStr,
-			}).Debug("Allocated IP")
-			return ipStr, nil
-		}
-	}
-
-	// Wrap around and check from 2 to original nextIP
-	for ip := 2; ip < vm.nextIP; ip++ {
-		ipStr := fmt.Sprintf("192.168.127.%d", ip)
-		if !vm.usedIPs[ipStr] {
-			vm.usedIPs[ipStr] = true
-			vm.ipPool[instanceID] = ipStr
-			vm.nextIP = ip + 1
-			vm.logger.WithFields(logger.Fields{
-				"instance_id": instanceID,
-				"ip":          ipStr,
-			}).Debug("Allocated IP (wrapped)")
-			return ipStr, nil
-		}
-	}
-
-	return "", fmt.Errorf("no available IPs")
+// GetTapNameForPlugin generates the TAP name for a plugin
+func (vm *VMService) GetTapNameForPlugin(pluginSlug string) string {
+	// Generate unique TAP name using MD5 hash (max 15 chars for interface names)
+	// Format: tap-{first 8 chars of MD5 hash}
+	hash := md5.Sum([]byte(pluginSlug))
+	hashHex := fmt.Sprintf("%x", hash)
+	shortHash := hashHex[:8]
+	return fmt.Sprintf("tap-%s", shortHash)
 }
 
-// deallocateIP releases an IP address when a VM is stopped
-func (vm *VMService) deallocateIP(instanceID string) {
-	vm.mutex.Lock()
-	defer vm.mutex.Unlock()
+// createTapInterface creates a TAP interface for a plugin
+func (vm *VMService) createTapInterface(pluginSlug string, instanceID string) (string, error) {
+	// Generate unique TAP name using MD5 hash of plugin + instance (max 15 chars for interface names)
+	// Format: tap-{first 8 chars of MD5 hash}
+	uniqueID := fmt.Sprintf("%s-%s", pluginSlug, instanceID)
+	hash := md5.Sum([]byte(uniqueID))
+	hashHex := fmt.Sprintf("%x", hash)
+	shortHash := hashHex[:8]
+	tapName := fmt.Sprintf("tap-%s", shortHash)
 
-	if ip, exists := vm.ipPool[instanceID]; exists {
-		delete(vm.usedIPs, ip)
-		delete(vm.ipPool, instanceID)
+	// Check if TAP already exists
+	if vm.tapExists(tapName) {
 		vm.logger.WithFields(logger.Fields{
-			"instance_id": instanceID,
-			"ip":          ip,
-		}).Debug("Deallocated IP")
+			"tap_name": tapName,
+		}).Debug("TAP interface already exists")
+		return tapName, nil
 	}
+
+	// Create TAP interface using ip command
+	cmd := exec.Command("ip", "tuntap", "add", tapName, "mode", "tap")
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("failed to create TAP interface %s: %v", tapName, err)
+	}
+
+	// Set TAP interface up
+	cmd = exec.Command("ip", "link", "set", tapName, "up")
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("failed to set TAP interface %s up: %v", tapName, err)
+	}
+
+	// Add TAP interface to the bridge
+	cmd = exec.Command("brctl", "addif", "fcnetbridge0", tapName)
+	if err := cmd.Run(); err != nil {
+		vm.logger.WithFields(logger.Fields{
+			"tap_name": tapName,
+			"error":    err,
+		}).Warn("Failed to add TAP to bridge (may already be added)")
+	}
+
+	vm.logger.WithFields(logger.Fields{
+		"tap_name":    tapName,
+		"plugin_slug": pluginSlug,
+		"instance_id": instanceID,
+		"bridge":      "fcnetbridge0",
+	}).Info("Created TAP interface and added to bridge")
+
+	return tapName, nil
 }
 
-// setupNetworkInterface creates and configures the tap interface for the VM
-func (vm *VMService) setupNetworkInterface(tapName, vmIP string) error {
-	bridgeName := "fc-br"
+// tapExists checks if a TAP interface exists
+func (vm *VMService) tapExists(tapName string) bool {
+	cmd := exec.Command("ip", "link", "show", tapName)
+	return cmd.Run() == nil
+}
+
+// deleteTapInterface deletes a TAP interface
+func (vm *VMService) deleteTapInterface(tapName string) error {
+	if !vm.tapExists(tapName) {
+		return nil // Already deleted
+	}
+
+	// Remove TAP interface from bridge first
+	cmd := exec.Command("brctl", "delif", "fcnetbridge0", tapName)
+	if err := cmd.Run(); err != nil {
+		vm.logger.WithFields(logger.Fields{
+			"tap_name": tapName,
+			"error":    err,
+		}).Warn("Failed to remove TAP from bridge (may not be connected)")
+	}
+
+	// Delete TAP interface
+	cmd = exec.Command("ip", "link", "delete", tapName)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to delete TAP interface %s: %v", tapName, err)
+	}
 
 	vm.logger.WithFields(logger.Fields{
 		"tap_name": tapName,
-	}).Debug("Setting up network interface")
-
-	// Check if bridge exists and create if needed
-	if _, err := exec.Command("ip", "link", "show", bridgeName).CombinedOutput(); err != nil {
-		vm.logger.WithFields(logger.Fields{
-			"bridge": bridgeName,
-		}).Debug("Creating bridge")
-		// Bridge doesn't exist, create it
-		if output, err := exec.Command("brctl", "addbr", bridgeName).CombinedOutput(); err != nil {
-			return fmt.Errorf("failed to create bridge %s: %v, output: %s", bridgeName, err, string(output))
-		}
-	}
-
-	// Add IP to bridge and bring it up
-	vm.logger.WithFields(logger.Fields{
-		"bridge": bridgeName,
-		"ip":     "192.168.127.1/24",
-	}).Debug("Adding IP to bridge")
-	if output, err := exec.Command("ip", "addr", "add", "192.168.127.1/24", "dev", bridgeName).CombinedOutput(); err != nil {
-		// Ignore error if IP already exists
-		if !strings.Contains(string(output), "File exists") && !strings.Contains(string(output), "Address already assigned") {
-			return fmt.Errorf("failed to add IP to bridge: exit status %v, output: %s", err, string(output))
-		}
-	}
-
-	// Bring bridge up
-	if output, err := exec.Command("ip", "link", "set", "dev", bridgeName, "up").CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to bring bridge up: %v, output: %s", err, string(output))
-	}
-
-	// Delete existing tap interface if it exists
-	if output, err := exec.Command("ip", "link", "delete", tapName).CombinedOutput(); err != nil {
-		// Ignore error if interface doesn't exist
-		if !strings.Contains(string(output), "Cannot find device") {
-			return fmt.Errorf("failed to delete existing tap interface: %v, output: %s", err, string(output))
-		}
-	}
-
-	// Create tap interface
-	vm.logger.WithFields(logger.Fields{
-		"tap": tapName,
-	}).Debug("Creating tap interface")
-	if output, err := exec.Command("ip", "tuntap", "add", "dev", tapName, "mode", "tap").CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to create tap interface %s: %v, output: %s", tapName, err, string(output))
-	}
-
-	// Bring tap interface up
-	vm.logger.WithFields(logger.Fields{
-		"tap": tapName,
-	}).Debug("Bringing up tap interface")
-	if output, err := exec.Command("ip", "link", "set", "dev", tapName, "up").CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to bring tap interface up: %v, output: %s", err, string(output))
-	}
-
-	// Add tap to bridge
-	vm.logger.WithFields(logger.Fields{
-		"tap":    tapName,
-		"bridge": bridgeName,
-	}).Debug("Adding tap to bridge")
-	if output, err := exec.Command("brctl", "addif", bridgeName, tapName).CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to add tap to bridge: %v, output: %s", err, string(output))
-	}
-
-	vm.logger.WithFields(logger.Fields{
-		"tap":    tapName,
-		"bridge": bridgeName,
-	}).Debug("Network interface setup completed successfully")
+		"bridge":   "fcnetbridge0",
+	}).Info("Deleted TAP interface and removed from bridge")
 
 	return nil
 }
 
-// generateTapName creates a short, unique tap interface name (max 15 chars for Linux)
-func (vm *VMService) generateTapName(instanceID string) string {
-	// Linux interface names are limited to 15 characters
-	// Use format: "fc-" + 8-char hash = 11 characters total
-	hash := md5.Sum([]byte(instanceID))
-	shortHash := hex.EncodeToString(hash[:4]) // 8 characters
-	return fmt.Sprintf("fc-%s", shortHash)
+// allocateIP allocates a unique IP address for a VM instance
+func (vm *VMService) allocateIP() string {
+	vm.ipPoolMutex.Lock()
+	defer vm.ipPoolMutex.Unlock()
+
+	// Find the next available IP
+	for i := 0; i < 254; i++ { // 192.168.127.2 to 192.168.127.255
+		ipStr := vm.nextIP.String()
+
+		if !vm.ipPool[ipStr] {
+			// Allocate this IP
+			vm.ipPool[ipStr] = true
+
+			// Move to next IP for future allocations
+			vm.nextIP[3]++ // Increment last octet
+			if vm.nextIP[3] == 0 {
+				vm.nextIP[3] = 2 // Skip .0 and .1, start from .2
+			}
+
+			vm.logger.WithFields(logger.Fields{
+				"allocated_ip": ipStr,
+			}).Debug("Allocated IP for VM")
+
+			return ipStr
+		}
+
+		// Try next IP
+		vm.nextIP[3]++
+		if vm.nextIP[3] == 0 {
+			vm.nextIP[3] = 2 // Skip .0 and .1, start from .2
+		}
+	}
+
+	vm.logger.Error("No available IPs in pool")
+	return ""
 }
 
-// generatePluginTapName generates a consistent TAP device name for a plugin
-func (vm *VMService) generatePluginTapName(pluginSlug string) string {
-	// Generate a short random TAP name that fits within 15-character Linux limit
-	// Format: fc-{8 random chars} = 11 characters total
-	const charset = "abcdefghijklmnopqrstuvwxyz0123456789"
-	b := make([]byte, 8)
-	for i := range b {
-		b[i] = charset[rand.Intn(len(charset))]
-	}
-	return fmt.Sprintf("fc-%s", string(b))
-}
+// deallocateIP releases an IP address back to the pool
+func (vm *VMService) deallocateIP(ip string) {
+	vm.ipPoolMutex.Lock()
+	defer vm.ipPoolMutex.Unlock()
 
-// checkTapExists checks if a TAP device with the given name already exists
-func (vm *VMService) checkTapExists(tapName string) bool {
-	// Check if the tap device exists
-	if _, err := exec.Command("ip", "link", "show", tapName).CombinedOutput(); err == nil {
-		vm.logger.WithFields(logger.Fields{
-			"tap_name": tapName,
-		}).Debug("TAP device already exists")
-		return true
-	}
+	delete(vm.ipPool, ip)
+
 	vm.logger.WithFields(logger.Fields{
-		"tap_name": tapName,
-	}).Debug("TAP device does not exist")
-	return false
+		"deallocated_ip": ip,
+	}).Debug("Deallocated IP")
 }
 
-// cleanupNetworkInterface deletes the tap interface if it exists
-func (vm *VMService) cleanupNetworkInterface(tapName, vmIP, instanceID string) {
-	vm.logger.WithFields(logger.Fields{
-		"tap": tapName,
-	}).Debug("Cleaning up tap interface")
-	cmd := exec.Command("ip", "link", "delete", tapName)
-	if err := cmd.Run(); err != nil {
-		vm.logger.WithFields(logger.Fields{
-			"tap":   tapName,
-			"error": err,
-		}).Debug("Failed to clean up tap interface")
-	} else {
-		vm.logger.WithFields(logger.Fields{
-			"tap": tapName,
-		}).Debug("Cleaned up tap interface")
-	}
-}
+// loadExistingIPAssignments loads existing IP assignments from the plugin registry
+func (vm *VMService) loadExistingIPAssignments() error {
+	registryPath := filepath.Join(vm.config.DataDir, "plugins", "plugins.json")
 
-// CleanupPluginNetwork removes TAP device and frees IP for a plugin
-func (vm *VMService) CleanupPluginNetwork(plugin *cms_models.Plugin) error {
-	if plugin.TapDevice == "" && plugin.AssignedIP == "" {
-		vm.logger.WithFields(logger.Fields{
-			"plugin_slug": plugin.Slug,
-		}).Debug("No network configuration to cleanup")
+	// Check if registry file exists
+	if _, err := os.Stat(registryPath); os.IsNotExist(err) {
+		vm.logger.Debug("Plugin registry not found, starting with fresh IP pool")
 		return nil
 	}
 
-	vm.logger.WithFields(logger.Fields{
-		"plugin_slug": plugin.Slug,
-		"tap_device":  plugin.TapDevice,
-		"assigned_ip": plugin.AssignedIP,
-	}).Info("Cleaning up plugin network configuration")
+	// Read plugin registry
+	data, err := os.ReadFile(registryPath)
+	if err != nil {
+		return fmt.Errorf("failed to read plugin registry: %v", err)
+	}
 
-	// Remove TAP device if it exists
-	if plugin.TapDevice != "" {
-		if vm.checkTapExists(plugin.TapDevice) {
-			cmd := exec.Command("ip", "link", "delete", plugin.TapDevice)
-			if err := cmd.Run(); err != nil {
-				vm.logger.WithFields(logger.Fields{
-					"plugin_slug": plugin.Slug,
-					"tap_device":  plugin.TapDevice,
-					"error":       err,
-				}).Error("Failed to delete TAP device")
-				return fmt.Errorf("failed to delete TAP device %s: %v", plugin.TapDevice, err)
-			}
+	// Parse JSON to get existing IP assignments
+	var registry struct {
+		Plugins map[string]struct {
+			AssignedIP string `json:"assigned_ip"`
+			TapDevice  string `json:"tap_device"`
+		} `json:"plugins"`
+	}
+
+	if err := json.Unmarshal(data, &registry); err != nil {
+		return fmt.Errorf("failed to parse plugin registry: %v", err)
+	}
+
+	// Mark existing IPs as allocated
+	vm.ipPoolMutex.Lock()
+	defer vm.ipPoolMutex.Unlock()
+
+	for _, plugin := range registry.Plugins {
+		if plugin.AssignedIP != "" {
+			vm.ipPool[plugin.AssignedIP] = true
 			vm.logger.WithFields(logger.Fields{
-				"plugin_slug": plugin.Slug,
+				"assigned_ip": plugin.AssignedIP,
 				"tap_device":  plugin.TapDevice,
-			}).Info("Deleted TAP device")
+			}).Debug("Loaded existing IP assignment")
 		}
 	}
 
-	// Free the IP address from our pool
-	if plugin.AssignedIP != "" {
-		vm.mutex.Lock()
-		for instanceID, ip := range vm.ipPool {
-			if ip == plugin.AssignedIP {
-				vm.deallocateIP(instanceID)
-				break
-			}
-		}
-		vm.mutex.Unlock()
-
-		vm.logger.WithFields(logger.Fields{
-			"plugin_slug": plugin.Slug,
-			"freed_ip":    plugin.AssignedIP,
-		}).Info("Freed IP address")
-	}
+	vm.logger.WithFields(logger.Fields{
+		"loaded_assignments": len(registry.Plugins),
+	}).Info("Loaded existing IP assignments from plugin registry")
 
 	return nil
+}
+
+// getVMIPFromStatic retrieves the IP address for a VM instance with static networking
+func (vm *VMService) getVMIPFromStatic(instanceID string) string {
+	// Get the VM instance from tracking
+	vm.vmMutex.RLock()
+	vmInstance, exists := vm.vms[instanceID]
+	vm.vmMutex.RUnlock()
+
+	if !exists {
+		vm.logger.WithFields(logger.Fields{
+			"instance_id": instanceID,
+		}).Debug("Instance not found in tracking")
+		return ""
+	}
+
+	// Return the allocated IP for this VM instance
+	return vmInstance.IP
 }

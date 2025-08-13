@@ -254,19 +254,11 @@ func (ps *PluginService) ActivatePlugin(slug string, vmService *VMService) (*mod
 			"plugin_slug": slug,
 		}).Info("Plugin has existing snapshot, marking as active")
 
-		// Ensure network configuration is set
-		if plugin.AssignedIP == "" || plugin.TapDevice == "" {
-			// Allocate network configuration
-			instanceID := fmt.Sprintf("%s-activate", slug)
-			vmIP, err := vmService.allocateIP(instanceID) // This should use a temporary allocation method
-			if err != nil {
-				return nil, fmt.Errorf("failed to allocate IP: %v", err)
-			}
-			tapName := vmService.generatePluginTapName(slug)
-
-			plugin.AssignedIP = vmIP
-			plugin.TapDevice = tapName
-		}
+		// With static networking, ensure TAP interface exists
+		// IP is already assigned and persisted
+		ps.logger.WithFields(logger.Fields{
+			"plugin_slug": slug,
+		}).Info("Static networking will handle network configuration")
 
 		plugin.Status = "active"
 		plugin.UpdatedAt = time.Now()
@@ -277,8 +269,6 @@ func (ps *PluginService) ActivatePlugin(slug string, vmService *VMService) (*mod
 
 		ps.logger.WithFields(logger.Fields{
 			"plugin_slug": slug,
-			"assigned_ip": plugin.AssignedIP,
-			"tap_device":  plugin.TapDevice,
 		}).Info("Plugin activated with existing snapshot")
 		return plugin, nil
 	}
@@ -298,32 +288,16 @@ func (ps *PluginService) ActivatePlugin(slug string, vmService *VMService) (*mod
 		return nil, fmt.Errorf("failed to start VM: %v", err)
 	}
 
-	// Get VM IP and TAP device name from VM service
+	// Get VM IP from static networking
 	vmIP, exists := vmService.GetVMIP(instanceID)
 	if !exists {
 		return nil, fmt.Errorf("failed to get VM IP after start")
 	}
 
-	// Only generate new TAP name if plugin doesn't have one
-	var tapName string
-	if plugin.TapDevice != "" {
-		tapName = plugin.TapDevice
-		ps.logger.WithFields(logger.Fields{
-			"plugin_slug": slug,
-			"tap_device":  tapName,
-		}).Info("Reusing existing TAP device for plugin")
-	} else {
-		tapName = vmService.generatePluginTapName(slug)
-		ps.logger.WithFields(logger.Fields{
-			"plugin_slug": slug,
-			"tap_device":  tapName,
-		}).Info("Generated new TAP device for plugin")
-	}
-
-	// Store network configuration in plugin
-	plugin.AssignedIP = vmIP
-	plugin.TapDevice = tapName
-	ps.plugins[slug] = plugin
+	ps.logger.WithFields(logger.Fields{
+		"plugin_slug": slug,
+		"vm_ip":       vmIP,
+	}).Info("VM started successfully with static networking")
 
 	// Allow extra time for VM boot and Python app initialization
 	time.Sleep(3 * time.Second)
@@ -348,6 +322,50 @@ func (ps *PluginService) ActivatePlugin(slug string, vmService *VMService) (*mod
 		return nil, fmt.Errorf("failed to create snapshot: %v", err)
 	}
 
+	// Pause the VM and add it to pre-warm pool for instant execution
+	ps.logger.WithFields(logger.Fields{
+		"plugin_slug": slug,
+		"instance_id": instanceID,
+		"vm_ip":       vmIP,
+	}).Info("Pausing VM and adding to pre-warm pool")
+
+	// Pause the VM (keep it in memory for instant resume)
+	if err := vmService.PauseVM(instanceID); err != nil {
+		ps.logger.WithFields(logger.Fields{
+			"plugin_slug": slug,
+			"error":       err,
+		}).Warn("Failed to pause VM, will stop it instead")
+		// Fallback: stop the VM if pause fails
+		if stopErr := vmService.StopVM(instanceID); stopErr != nil {
+			ps.logger.WithFields(logger.Fields{
+				"plugin_slug": slug,
+				"error":       stopErr,
+			}).Error("Failed to stop VM after pause failure")
+		}
+	} else {
+		// Add paused VM to pre-warm pool
+		prewarmInstance := &PrewarmInstance{
+			InstanceID:   instanceID,
+			Machine:      nil, // Will be retrieved from VM service when needed
+			IP:           vmIP,
+			TapName:      vmService.GetTapNameForPlugin(plugin.Slug),
+			CreatedAt:    time.Now(),
+			LastUsed:     time.Now(),
+			SnapshotType: "full",
+		}
+		vmService.AddToPrewarmPool(slug, prewarmInstance)
+
+		ps.logger.WithFields(logger.Fields{
+			"plugin_slug": slug,
+			"instance_id": instanceID,
+			"vm_ip":       vmIP,
+		}).Info("VM paused and added to pre-warm pool for instant execution")
+	}
+
+	// Persist the assigned IP and TAP device for this plugin
+	plugin.AssignedIP = vmIP
+	plugin.TapDevice = vmService.GetTapNameForPlugin(plugin.Slug)
+
 	plugin.Status = "active"
 	plugin.UpdatedAt = time.Now()
 
@@ -360,7 +378,7 @@ func (ps *PluginService) ActivatePlugin(slug string, vmService *VMService) (*mod
 		"snapshot_path": snapshotPath,
 		"assigned_ip":   plugin.AssignedIP,
 		"tap_device":    plugin.TapDevice,
-	}).Info("Plugin activated successfully with snapshot")
+	}).Info("Plugin activated successfully with snapshot and persistent networking")
 
 	return plugin, nil
 }
@@ -391,18 +409,11 @@ func (ps *PluginService) DeactivatePlugin(slug string, vmService *VMService) (*m
 		// Continue with deactivation even if snapshot deletion fails
 	}
 
-	// Clean up network resources (TAP device and IP)
-	if err := vmService.CleanupPluginNetwork(plugin); err != nil {
-		ps.logger.WithFields(logger.Fields{
-			"plugin_slug": slug,
-			"error":       err,
-		}).Error("Failed to cleanup network during deactivation")
-		// Continue with deactivation even if network cleanup fails
-	}
+	// CNI handles network cleanup automatically
+	ps.logger.WithFields(logger.Fields{
+		"plugin_slug": slug,
+	}).Info("CNI handles network cleanup automatically")
 
-	// Clear network configuration from plugin registry
-	plugin.AssignedIP = ""
-	plugin.TapDevice = ""
 	plugin.Status = "inactive"
 	plugin.UpdatedAt = time.Now()
 
@@ -465,54 +476,107 @@ func (ps *PluginService) ExecuteAction(actionHook string, payload map[string]int
 	for _, plugin := range targetPlugins {
 		startTime := time.Now()
 
-		// Create unique execution instance ID
-		instanceID := fmt.Sprintf("%s-exec-%d", plugin.Slug, time.Now().UnixNano())
+		// Try to get a pre-warmed instance from the pool
+		prewarmInstance := vmService.GetPrewarmInstance(plugin.Slug)
 
-		ps.logger.WithFields(logger.Fields{
-			"plugin_slug": plugin.Slug,
-			"instance_id": instanceID,
-			"action_hook": actionHook,
-		}).Info("Starting VM for real action execution")
+		var instanceID string
+		var vmIP string
 
-		// REAL EXECUTION: Resume VM from snapshot for ultra-fast execution
-		if err := vmService.ResumeFromSnapshot(instanceID, plugin); err != nil {
+		if prewarmInstance != nil {
+			// Use pre-warmed instance for ultra-fast execution
+			instanceID = prewarmInstance.InstanceID
+			vmIP = prewarmInstance.IP
+
 			ps.logger.WithFields(logger.Fields{
 				"plugin_slug": plugin.Slug,
-				"error":       err,
-			}).Error("Failed to resume VM from snapshot")
+				"instance_id": instanceID,
+				"action_hook": actionHook,
+			}).Info("Using pre-warmed instance for ultra-fast execution")
 
-			results = append(results, map[string]interface{}{
-				"plugin_slug":       plugin.Slug,
-				"success":           false,
-				"result":            map[string]interface{}{"error": fmt.Sprintf("Failed to resume VM: %v", err)},
-				"execution_time_ms": int(time.Since(startTime).Milliseconds()),
-			})
-			continue
+			// Resume the paused VM for execution
+			if err := vmService.ResumeVM(instanceID); err != nil {
+				ps.logger.WithFields(logger.Fields{
+					"plugin_slug": plugin.Slug,
+					"error":       err,
+				}).Error("Failed to resume pre-warmed VM")
+
+				results = append(results, map[string]interface{}{
+					"plugin_slug":       plugin.Slug,
+					"success":           false,
+					"result":            map[string]interface{}{"error": fmt.Sprintf("Failed to resume VM: %v", err)},
+					"execution_time_ms": int(time.Since(startTime).Milliseconds()),
+				})
+				continue
+			}
+
+			// Return VM to pool after execution
+			defer func(pluginSlug string, instance *PrewarmInstance) {
+				// Pause VM and return to pool
+				if pauseErr := vmService.PauseVM(instance.InstanceID); pauseErr != nil {
+					ps.logger.WithFields(logger.Fields{
+						"instance_id": instance.InstanceID,
+						"error":       pauseErr,
+					}).Error("Failed to pause VM for pool return")
+				} else {
+					vmService.ReturnPrewarmInstance(pluginSlug, instance)
+				}
+			}(plugin.Slug, prewarmInstance)
+
+		} else {
+			// Fallback: Resume VM from snapshot for execution
+			instanceID = fmt.Sprintf("%s-exec-%d", plugin.Slug, time.Now().UnixNano())
+
+			ps.logger.WithFields(logger.Fields{
+				"plugin_slug": plugin.Slug,
+				"instance_id": instanceID,
+				"action_hook": actionHook,
+			}).Info("No pre-warmed instance available, resuming from snapshot")
+
+			// Resume VM from snapshot for execution
+			if err := vmService.ResumeFromSnapshot(instanceID, plugin); err != nil {
+				ps.logger.WithFields(logger.Fields{
+					"plugin_slug": plugin.Slug,
+					"error":       err,
+				}).Error("Failed to resume VM from snapshot")
+
+				results = append(results, map[string]interface{}{
+					"plugin_slug":       plugin.Slug,
+					"success":           false,
+					"result":            map[string]interface{}{"error": fmt.Sprintf("Failed to resume VM: %v", err)},
+					"execution_time_ms": int(time.Since(startTime).Milliseconds()),
+				})
+				continue
+			}
+
+			// Get VM IP for making HTTP requests
+			var exists bool
+			vmIP, exists = vmService.GetVMIP(instanceID)
+			if !exists {
+				results = append(results, map[string]interface{}{
+					"plugin_slug":       plugin.Slug,
+					"success":           false,
+					"result":            map[string]interface{}{"error": "Failed to get VM IP"},
+					"execution_time_ms": int(time.Since(startTime).Milliseconds()),
+				})
+				continue
+			}
+
+			// Ensure VM cleanup for snapshot-based execution
+			defer func(instanceID string) {
+				if stopErr := vmService.StopVM(instanceID); stopErr != nil {
+					ps.logger.WithFields(logger.Fields{
+						"instance_id": instanceID,
+						"error":       stopErr,
+					}).Error("Failed to stop execution VM")
+				}
+			}(instanceID)
 		}
 
-		// Ensure VM cleanup
-		defer func(instanceID string) {
-			if stopErr := vmService.StopVM(instanceID); stopErr != nil {
-				ps.logger.WithFields(logger.Fields{
-					"instance_id": instanceID,
-					"error":       stopErr,
-				}).Error("Failed to stop execution VM")
-			}
-		}(instanceID)
-
-		// Brief wait for snapshot resume to complete (much faster than cold boot)
-		time.Sleep(100 * time.Millisecond)
-
-		// Get VM IP for making REAL HTTP requests
-		vmIP, exists := vmService.GetVMIP(instanceID)
-		if !exists {
-			results = append(results, map[string]interface{}{
-				"plugin_slug":       plugin.Slug,
-				"success":           false,
-				"result":            map[string]interface{}{"error": "Failed to get VM IP"},
-				"execution_time_ms": int(time.Since(startTime).Milliseconds()),
-			})
-			continue
+		// Brief wait for VM to be ready
+		if prewarmInstance != nil {
+			time.Sleep(10 * time.Millisecond) // Pre-warmed instances are almost instant
+		} else {
+			time.Sleep(100 * time.Millisecond) // Snapshot resume takes a bit longer
 		}
 
 		// Find the appropriate action endpoint
@@ -540,7 +604,7 @@ func (ps *PluginService) ExecuteAction(actionHook string, payload map[string]int
 			continue
 		}
 
-		// REAL HTTP REQUEST to the plugin VM
+		// HTTP REQUEST to the running plugin VM
 		actionURL := fmt.Sprintf("http://%s:80%s", vmIP, targetAction.Endpoint)
 
 		requestPayload := map[string]interface{}{
@@ -552,7 +616,7 @@ func (ps *PluginService) ExecuteAction(actionHook string, payload map[string]int
 			"plugin_slug": plugin.Slug,
 			"action_url":  actionURL,
 			"method":      targetAction.Method,
-		}).Info("Making REAL HTTP request to plugin")
+		}).Info("Making HTTP request to running plugin VM")
 
 		response, err := ps.makeHTTPRequest(targetAction.Method, actionURL, requestPayload)
 		if err != nil {
@@ -560,7 +624,7 @@ func (ps *PluginService) ExecuteAction(actionHook string, payload map[string]int
 				"plugin_slug": plugin.Slug,
 				"action_url":  actionURL,
 				"error":       err,
-			}).Error("REAL HTTP request to plugin failed")
+			}).Error("HTTP request to plugin failed")
 
 			results = append(results, map[string]interface{}{
 				"plugin_slug":       plugin.Slug,
@@ -571,7 +635,7 @@ func (ps *PluginService) ExecuteAction(actionHook string, payload map[string]int
 			continue
 		}
 
-		// REAL SUCCESS: Actual response from plugin
+		// SUCCESS: Actual response from plugin
 		results = append(results, map[string]interface{}{
 			"plugin_slug":       plugin.Slug,
 			"success":           true,
@@ -583,7 +647,7 @@ func (ps *PluginService) ExecuteAction(actionHook string, payload map[string]int
 			"plugin_slug":    plugin.Slug,
 			"execution_time": time.Since(startTime).Milliseconds(),
 			"action_hook":    actionHook,
-		}).Info("REAL action executed successfully")
+		}).Info("Action executed successfully")
 	}
 
 	return map[string]interface{}{
