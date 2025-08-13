@@ -86,19 +86,6 @@ This will:
 
 The `cms-starter` tool is your main interface for managing the CMS:
 
-```bash
-# Check CMS status
-./cms-starter/bin/cms-starter status
-
-# Start CMS
-./cms-starter/bin/cms-starter start --dev
-
-# Stop CMS
-./cms-starter/bin/cms-starter stop
-
-# Restart CMS
-./cms-starter/bin/cms-starter restart
-```
 
 ## Building Plugins
 
@@ -168,7 +155,6 @@ curl -X POST -H "Content-Type: application/json" \
 The CMS will:
 - Find all active plugins that handle the action
 - Execute them in priority order
-- Return aggregated results
 
 ## API Reference
 
@@ -198,16 +184,12 @@ The CMS will:
 ```bash
 # Development
 make dev          # Start CMS in development mode
-make deploy       # Build production image and restart CMS
-make test         # Run complete test suite
-make clean        # Stop containers and clean up
 ```
 
 ### Testing
 
 ```bash
-# Run all tests
-make test
+# work in progress
 
 # Manual testing workflow
 # 1. Build plugin
