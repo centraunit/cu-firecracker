@@ -102,13 +102,13 @@ app.get('/actions', (req: Request, res: Response) => {
             "priority": 5
         }
     });
-});
+}); 
 
 // Content management endpoint
 app.post('/actions/content', (req: Request, res: Response) => {
     const { action, ...params } = req.body;
     const data = readData();
-
+    
     try {
         switch (action) {
             case 'create':
@@ -123,7 +123,7 @@ app.post('/actions/content', (req: Request, res: Response) => {
                 writeData(data);
                 res.json({ success: true, content: newContent });
                 break;
-
+                
             case 'update':
                 const contentId = parseInt(params.id);
                 const contentIndex = data.content.findIndex(c => c.id === contentId);
@@ -211,8 +211,8 @@ app.post('/actions/seo', (req: Request, res: Response) => {
                 const content = data.content.find(c => c.id === contentId);
                 if (content) {
                     const score = Math.floor(Math.random() * 40) + 60; // Random score 60-100
-                    res.json({ 
-                        success: true, 
+                res.json({
+                    success: true,
                         seo_analysis: {
                             content_id: contentId,
                             score: score,
@@ -223,7 +223,7 @@ app.post('/actions/seo', (req: Request, res: Response) => {
                     res.status(404).json({ success: false, error: 'Content not found' });
                 }
                 break;
-
+                
             case 'optimize':
                 const optimizeId = parseInt(params.id);
                 const contentIndex = data.content.findIndex(c => c.id === optimizeId);
@@ -235,13 +235,13 @@ app.post('/actions/seo', (req: Request, res: Response) => {
                     res.status(404).json({ success: false, error: 'Content not found' });
                 }
                 break;
-
+                
             default:
                 res.json({ success: false, error: 'Unknown SEO action' });
         }
     } catch (error) {
         res.status(500).json({ success: false, error: 'Internal server error' });
-    }
+        }
 });
 
 // Root endpoint
