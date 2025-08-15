@@ -242,8 +242,14 @@ func (s *Server) handleUploadPlugin(w http.ResponseWriter, r *http.Request) {
 		"size":     header.Size,
 	}).Debug("Received plugin ZIP file")
 
+	// Parse force parameter from query string
+	force := false
+	if forceStr := r.URL.Query().Get("force"); forceStr == "true" {
+		force = true
+	}
+
 	// Upload the plugin using the plugin service
-	plugin, err := s.pluginService.UploadPlugin(file, header.Filename)
+	plugin, err := s.pluginService.UploadPlugin(file, header.Filename, force)
 	if err != nil {
 		s.logger.WithFields(logger.Fields{
 			"error": err,

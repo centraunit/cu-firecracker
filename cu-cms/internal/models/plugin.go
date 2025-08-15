@@ -22,7 +22,7 @@ type Plugin struct {
 	KernelPath  string                  `json:"kernel_path"`
 	CreatedAt   time.Time               `json:"created_at"`
 	UpdatedAt   time.Time               `json:"updated_at"`
-	Status      string                  `json:"status"` // ready, inactive, active, failed
+	Status      string                  `json:"status"` // installed, active, failed
 	Health      PluginHealth            `json:"health"`
 	Actions     map[string]PluginAction `json:"actions"`  // action_name -> PluginAction
 	Priority    int                     `json:"priority"` // Execution order for same action
@@ -61,11 +61,9 @@ type ActionExecutionResult struct {
 
 // PluginStatus constants
 const (
-	PluginStatusReady    = "ready"
-	PluginStatusInactive = "inactive"
-	PluginStatusActive   = "active"
-	PluginStatusFailed   = "failed"
-	PluginStatusUploaded = "uploaded"
+	PluginStatusInstalled = "installed"
+	PluginStatusActive    = "active"
+	PluginStatusFailed    = "failed"
 )
 
 // PluginHealthStatus constants
@@ -84,7 +82,7 @@ func NewPlugin(slug, name, version string) *Plugin {
 		Version:   version,
 		CreatedAt: now,
 		UpdatedAt: now,
-		Status:    PluginStatusReady,
+		Status:    PluginStatusInstalled, // New plugins start as installed
 		Health: PluginHealth{
 			Status:    HealthStatusUnknown,
 			LastCheck: now,
@@ -112,6 +110,11 @@ func (p *Plugin) SetStatus(status string) {
 // IsActive returns true if the plugin is active
 func (p *Plugin) IsActive() bool {
 	return p.Status == PluginStatusActive
+}
+
+// IsInstalled returns true if the plugin is installed
+func (p *Plugin) IsInstalled() bool {
+	return p.Status == PluginStatusInstalled
 }
 
 // IsHealthy returns true if the plugin is healthy
