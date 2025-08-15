@@ -443,6 +443,23 @@ func (vm *VMService) StopVM(instanceID string) error {
 		"instance_id": instanceID,
 	}).Info("Stopping VM")
 
+	// For paused VMs, we need to resume first before shutting down
+	// This is because SendCtrlAltDel doesn't work on paused VMs
+	vm.logger.WithFields(logger.Fields{
+		"instance_id": instanceID,
+	}).Debug("Resuming VM before shutdown (in case it's paused)")
+
+	if err := instance.Machine.ResumeVM(context.Background()); err != nil {
+		vm.logger.WithFields(logger.Fields{
+			"instance_id": instanceID,
+			"error":       err,
+		}).Debug("VM was not paused or already running")
+		// This is OK - the VM might already be running
+	}
+
+	// Give the VM a moment to fully resume
+	time.Sleep(100 * time.Millisecond)
+
 	// Stop the Firecracker machine
 	if err := instance.Machine.Shutdown(context.Background()); err != nil {
 		vm.logger.WithFields(logger.Fields{
@@ -457,6 +474,20 @@ func (vm *VMService) StopVM(instanceID string) error {
 				"error":       killErr,
 			}).Error("Failed to force kill machine")
 		}
+	}
+
+	// Wait for the Firecracker process to actually finish
+	// This is crucial - the SDK methods above only send signals, but don't wait for the process to exit
+	vm.logger.WithFields(logger.Fields{
+		"instance_id": instanceID,
+	}).Debug("Waiting for Firecracker process to exit")
+
+	if err := instance.Machine.Wait(context.Background()); err != nil {
+		vm.logger.WithFields(logger.Fields{
+			"instance_id": instanceID,
+			"error":       err,
+		}).Error("Failed to wait for Firecracker process to exit")
+		// Continue with cleanup even if wait fails
 	}
 
 	// Deallocate IP before removing from tracking
@@ -480,11 +511,12 @@ func (vm *VMService) StopVM(instanceID string) error {
 func (vm *VMService) PauseVM(instanceID string) error {
 	vm.poolMutex.RLock()
 	instance, exists := vm.prewarmPool[instanceID]
-	vm.poolMutex.RUnlock()
-
 	if !exists {
+		vm.poolMutex.RUnlock()
 		return fmt.Errorf("VM instance %s not found", instanceID)
 	}
+	// Keep the lock while we use the instance to prevent race conditions
+	defer vm.poolMutex.RUnlock()
 
 	vm.logger.WithFields(logger.Fields{
 		"instance_id": instanceID,
@@ -510,11 +542,12 @@ func (vm *VMService) PauseVM(instanceID string) error {
 func (vm *VMService) ResumeVM(instanceID string) error {
 	vm.poolMutex.RLock()
 	instance, exists := vm.prewarmPool[instanceID]
-	vm.poolMutex.RUnlock()
-
 	if !exists {
+		vm.poolMutex.RUnlock()
 		return fmt.Errorf("VM instance %s not found", instanceID)
 	}
+	// Keep the lock while we use the instance to prevent race conditions
+	defer vm.poolMutex.RUnlock()
 
 	vm.logger.WithFields(logger.Fields{
 		"instance_id": instanceID,
@@ -540,11 +573,12 @@ func (vm *VMService) ResumeVM(instanceID string) error {
 func (vm *VMService) CreateSnapshot(instanceID, snapshotDir string, useDifferential bool) error {
 	vm.poolMutex.RLock()
 	instance, exists := vm.prewarmPool[instanceID]
-	vm.poolMutex.RUnlock()
-
 	if !exists {
+		vm.poolMutex.RUnlock()
 		return fmt.Errorf("VM instance %s not found", instanceID)
 	}
+	// Keep the lock while we use the instance to prevent race conditions
+	defer vm.poolMutex.RUnlock()
 
 	vm.logger.WithFields(logger.Fields{
 		"instance_id":      instanceID,
@@ -695,14 +729,11 @@ func (vm *VMService) DeleteSnapshot(pluginSlug string) error {
 func (vm *VMService) GetVMIP(instanceID string) (string, bool) {
 	vm.poolMutex.RLock()
 	defer vm.poolMutex.RUnlock()
-
-	// Look for the instance in the prewarm pool
-	for _, instance := range vm.prewarmPool {
-		if instance.InstanceID == instanceID {
-			return instance.IP, true
-		}
+	instance, exists := vm.prewarmPool[instanceID]
+	if !exists {
+		return "", false
 	}
-	return "", false
+	return instance.IP, true
 }
 
 // ListVMs returns a list of running VM instance IDs from prewarm pool
@@ -752,12 +783,24 @@ func (vm *VMService) Shutdown(ctx context.Context) {
 				// Force stop if graceful shutdown fails
 				instance.Machine.StopVMM()
 			}
+
+			// Wait for the Firecracker process to actually finish
+			vm.logger.WithFields(logger.Fields{
+				"instance_id": instance.InstanceID,
+			}).Debug("Waiting for Firecracker process to exit")
+
+			if err := instance.Machine.Wait(ctx); err != nil {
+				vm.logger.WithFields(logger.Fields{
+					"instance_id": instance.InstanceID,
+					"error":       err,
+				}).Error("Failed to wait for Firecracker process to exit")
+			}
 		}
 
-		// CNI handles network cleanup automatically
+		// Static networking cleanup is handled by TAP interface management
 		vm.logger.WithFields(logger.Fields{
 			"instance_id": instance.InstanceID,
-		}).Debug("CNI handles network cleanup automatically")
+		}).Debug("Static networking cleanup handled by TAP interface management")
 	}
 
 	// Clear all instances from prewarm pool
@@ -1010,28 +1053,17 @@ func (vm *VMService) cleanupAndValidateState() error {
 		vm.logger.Info("🧹 Production mode: Conservative cleanup for stability")
 	}
 
-	// Step 1: Clean up orphaned TAP interfaces
+	// Step 1: Clean up orphaned TAP interfaces (only network cleanup needed)
 	if err := vm.cleanupOrphanedTapInterfaces(); err != nil {
 		vm.logger.WithFields(logger.Fields{
 			"error": err,
 		}).Warn("Failed to cleanup orphaned TAP interfaces")
 	}
 
-	// Step 2: Clean up orphaned Firecracker processes
-	if err := vm.cleanupOrphanedFirecrackerProcesses(); err != nil {
-		vm.logger.WithFields(logger.Fields{
-			"error": err,
-		}).Warn("Failed to cleanup orphaned Firecracker processes")
-	}
+	// Step 2: Firecracker SDK handles process and socket cleanup automatically
+	vm.logger.Debug("Firecracker SDK handles process and socket cleanup automatically")
 
-	// Step 3: Clean up orphaned socket files
-	if err := vm.cleanupOrphanedSocketFiles(); err != nil {
-		vm.logger.WithFields(logger.Fields{
-			"error": err,
-		}).Warn("Failed to cleanup orphaned socket files")
-	}
-
-	// Step 4: Validate and clean up plugin registry state
+	// Step 3: Validate and clean up plugin registry state
 	if err := vm.validatePluginRegistryState(); err != nil {
 		vm.logger.WithFields(logger.Fields{
 			"error": err,
@@ -1075,18 +1107,16 @@ func (vm *VMService) cleanupOrphanedTapInterfaces() error {
 						continue
 					}
 
-					// Check if this TAP is in use by any running Firecracker process
-					if !vm.isTapInUse(tapName) {
+					// Remove orphaned TAP interface (Firecracker SDK handles process management)
+					vm.logger.WithFields(logger.Fields{
+						"tap_name": tapName,
+					}).Debug("Removing orphaned TAP interface")
+
+					if err := vm.deleteTapInterface(tapName); err != nil {
 						vm.logger.WithFields(logger.Fields{
 							"tap_name": tapName,
-						}).Debug("Removing orphaned TAP interface")
-
-						if err := vm.deleteTapInterface(tapName); err != nil {
-							vm.logger.WithFields(logger.Fields{
-								"tap_name": tapName,
-								"error":    err,
-							}).Warn("Failed to remove orphaned TAP interface")
-						}
+							"error":    err,
+						}).Warn("Failed to remove orphaned TAP interface")
 					}
 				}
 			}
@@ -1094,104 +1124,6 @@ func (vm *VMService) cleanupOrphanedTapInterfaces() error {
 	}
 
 	return nil
-}
-
-// isTapInUse checks if a TAP interface is currently in use by a Firecracker process
-func (vm *VMService) isTapInUse(tapName string) bool {
-	// Check if any Firecracker process is using this TAP
-	cmd := exec.Command("ps", "aux")
-	output, err := cmd.Output()
-	if err != nil {
-		return false
-	}
-
-	lines := strings.Split(string(output), "\n")
-	for _, line := range lines {
-		if strings.Contains(line, "firecracker") && strings.Contains(line, tapName) {
-			return true
-		}
-	}
-
-	return false
-}
-
-// cleanupOrphanedFirecrackerProcesses kills orphaned Firecracker processes
-func (vm *VMService) cleanupOrphanedFirecrackerProcesses() error {
-	vm.logger.Debug("Cleaning up orphaned Firecracker processes")
-
-	// Find all Firecracker processes
-	cmd := exec.Command("pgrep", "-f", "firecracker")
-	output, err := cmd.Output()
-	if err != nil {
-		// No Firecracker processes found
-		return nil
-	}
-
-	pids := strings.Fields(string(output))
-	for _, pid := range pids {
-		pid = strings.TrimSpace(pid)
-		if pid == "" {
-			continue
-		}
-
-		vm.logger.WithFields(logger.Fields{
-			"pid": pid,
-		}).Debug("Killing orphaned Firecracker process")
-
-		// Kill the process
-		killCmd := exec.Command("kill", "-9", pid)
-		if err := killCmd.Run(); err != nil {
-			vm.logger.WithFields(logger.Fields{
-				"pid":   pid,
-				"error": err,
-			}).Warn("Failed to kill orphaned Firecracker process")
-		}
-	}
-
-	return nil
-}
-
-// cleanupOrphanedSocketFiles removes orphaned Firecracker socket files
-func (vm *VMService) cleanupOrphanedSocketFiles() error {
-	vm.logger.Debug("Cleaning up orphaned socket files")
-
-	socketDir := "/tmp/firecracker"
-	files, err := os.ReadDir(socketDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil // Directory doesn't exist
-		}
-		return fmt.Errorf("failed to read socket directory: %v", err)
-	}
-
-	for _, file := range files {
-		if strings.HasSuffix(file.Name(), ".sock") {
-			socketPath := filepath.Join(socketDir, file.Name())
-
-			// Check if any process is using this socket
-			if !vm.isSocketInUse(socketPath) {
-				vm.logger.WithFields(logger.Fields{
-					"socket": socketPath,
-				}).Debug("Removing orphaned socket file")
-
-				if err := os.Remove(socketPath); err != nil {
-					vm.logger.WithFields(logger.Fields{
-						"socket": socketPath,
-						"error":  err,
-					}).Warn("Failed to remove orphaned socket file")
-				}
-			}
-		}
-	}
-
-	return nil
-}
-
-// isSocketInUse checks if a socket file is currently in use
-func (vm *VMService) isSocketInUse(socketPath string) bool {
-	// Try to connect to the socket to see if it's in use
-	cmd := exec.Command("lsof", socketPath)
-	return cmd.Run() == nil
 }
 
 // validatePluginRegistryState validates and cleans up plugin registry state

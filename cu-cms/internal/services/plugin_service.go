@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -79,7 +80,7 @@ func (ps *PluginService) GetPlugin(slug string) (*models.Plugin, error) {
 }
 
 // UploadPlugin handles plugin upload and registration
-func (ps *PluginService) UploadPlugin(file multipart.File, filename string) (*models.Plugin, error) {
+func (ps *PluginService) UploadPlugin(file multipart.File, filename string, force bool) (*models.Plugin, error) {
 	ps.logger.WithFields(logger.Fields{
 		"filename": filename,
 	}).Info("Starting plugin upload")
@@ -157,10 +158,41 @@ func (ps *PluginService) UploadPlugin(file multipart.File, filename string) (*mo
 			"plugin_slug": metadata.Slug,
 			"old_version": existingPlugin.Version,
 			"new_version": metadata.Version,
-			"old_status":  existingPlugin.Status,
-		}).Info("Updating existing plugin")
+			"force":       force,
+		}).Info("Plugin already exists, checking update conditions")
 
-		// Handle cleanup of existing plugin resources if it's active or has resources
+		// Check version comparison and force requirements
+		reason := ""
+
+		if existingPlugin.Version == metadata.Version {
+			// Same version - require force=true
+			if !force {
+				return nil, fmt.Errorf("plugin '%s' version '%s' already exists. Use force=true to overwrite", metadata.Slug, metadata.Version)
+			}
+			reason = "force overwrite of same version"
+		} else {
+			// Different versions - compare
+			if ps.isVersionHigher(metadata.Version, existingPlugin.Version) {
+				// Higher version - always allow overwrite
+				reason = "upgrade to higher version"
+			} else {
+				// Lower version - require force=true
+				if !force {
+					return nil, fmt.Errorf("plugin '%s' version '%s' is lower than existing version '%s'. Use force=true to downgrade", metadata.Slug, metadata.Version, existingPlugin.Version)
+				}
+				reason = "force downgrade to lower version"
+			}
+		}
+
+		ps.logger.WithFields(logger.Fields{
+			"plugin_slug": metadata.Slug,
+			"old_version": existingPlugin.Version,
+			"new_version": metadata.Version,
+			"force":       force,
+			"reason":      reason,
+		}).Info("Proceeding with plugin installation")
+
+		// Always clean up existing plugin resources before update
 		if existingPlugin.Status == "active" || existingPlugin.AssignedIP != "" || existingPlugin.TapDevice != "" {
 			ps.logger.WithFields(logger.Fields{
 				"plugin_slug": metadata.Slug,
@@ -169,10 +201,7 @@ func (ps *PluginService) UploadPlugin(file multipart.File, filename string) (*mo
 				"has_tap":     existingPlugin.TapDevice != "",
 			}).Info("Cleaning up existing plugin resources before update")
 
-			// Remove from prewarm pool if exists
-			ps.vmService.RemoveFromPrewarmPool(metadata.Slug)
-
-			// Stop any running VM instance
+			// Stop any running VM instance first (this also removes from prewarm pool and deallocates IP)
 			instanceID := metadata.Slug
 			if err := ps.vmService.StopVM(instanceID); err != nil {
 				ps.logger.WithFields(logger.Fields{
@@ -204,7 +233,12 @@ func (ps *PluginService) UploadPlugin(file multipart.File, filename string) (*mo
 		existingPlugin.Runtime = metadata.Runtime
 		existingPlugin.RootfsPath = rootfsPath
 		existingPlugin.UpdatedAt = time.Now()
-		existingPlugin.Status = "ready" // Will be updated to "installed" after validation
+		// Preserve the existing status - if it was active, keep it active after update
+		// Only change to "installed" if it was previously failed
+		if existingPlugin.Status == "failed" {
+			existingPlugin.Status = "installed"
+		}
+		// Note: If status was "active", we keep it "active" - it will remain active after successful update
 		existingPlugin.Actions = metadata.Actions
 		existingPlugin.Health = models.PluginHealth{Status: "unknown"}
 		// Preserve existing network configuration for now, will be updated during validation
@@ -280,7 +314,16 @@ func (ps *PluginService) UploadPlugin(file multipart.File, filename string) (*mo
 				"tap_device":  existingPlugin.TapDevice,
 			}).Info("Preserved existing network configuration for plugin update")
 		}
-		existingPlugin.Status = "installed"
+
+		// Determine final status based on previous status
+		wasActive := existingPlugin.Status == "active"
+		if wasActive {
+			// Keep it active - will create prewarmed VM after cleanup
+			existingPlugin.Status = "active"
+		} else {
+			// Keep it installed - no VM will be created
+			existingPlugin.Status = "installed"
+		}
 		existingPlugin.UpdatedAt = time.Now()
 
 		// Save updated plugin state
@@ -294,8 +337,41 @@ func (ps *PluginService) UploadPlugin(file multipart.File, filename string) (*mo
 			return nil, fmt.Errorf("failed to save plugin state: %v", err)
 		}
 
-		// Clean up VM and network - no prewarm during update, clean for next step
-		ps.cleanupPluginVM(existingPlugin.Slug, instanceID, "plugin_update_success")
+		// Handle VM based on previous status
+		if wasActive {
+			// Plugin was active - keep the validation VM in prewarm pool
+			// Just pause it to add it to the prewarm pool for instant execution
+			ps.logger.WithFields(logger.Fields{
+				"plugin_slug": existingPlugin.Slug,
+			}).Info("Plugin was active - keeping validation VM in prewarm pool")
+
+			// Create snapshot for the validation VM
+			snapshotPath := ps.vmService.GetSnapshotPath(existingPlugin.Slug)
+			if err := ps.vmService.CreateSnapshot(instanceID, snapshotPath, false); err != nil {
+				ps.logger.WithFields(logger.Fields{
+					"plugin_slug": existingPlugin.Slug,
+					"error":       err,
+				}).Error("Failed to create snapshot for active plugin update")
+			} else {
+				// Pause VM to add to prewarm pool
+				if err := ps.vmService.PauseVM(instanceID); err != nil {
+					ps.logger.WithFields(logger.Fields{
+						"plugin_slug": existingPlugin.Slug,
+						"error":       err,
+					}).Error("Failed to pause VM for active plugin update")
+				} else {
+					ps.logger.WithFields(logger.Fields{
+						"plugin_slug": existingPlugin.Slug,
+					}).Info("Successfully kept validation VM in prewarm pool for active plugin")
+				}
+			}
+		} else {
+			// Plugin was not active - cleanup the validation VM
+			ps.logger.WithFields(logger.Fields{
+				"plugin_slug": existingPlugin.Slug,
+			}).Info("Plugin was not active - cleaning up validation VM")
+			ps.cleanupPluginVM(existingPlugin.Slug, instanceID, "plugin_update_success")
+		}
 
 		ps.logger.WithFields(logger.Fields{
 			"plugin_slug": existingPlugin.Slug,
@@ -303,7 +379,7 @@ func (ps *PluginService) UploadPlugin(file multipart.File, filename string) (*mo
 			"assigned_ip": existingPlugin.AssignedIP,
 			"tap_device":  existingPlugin.TapDevice,
 			"status":      existingPlugin.Status,
-		}).Info("Plugin updated and installed successfully")
+		}).Info("Plugin updated successfully")
 
 		return existingPlugin, nil
 	}
@@ -319,7 +395,7 @@ func (ps *PluginService) UploadPlugin(file multipart.File, filename string) (*mo
 		RootfsPath:  rootfsPath,
 		CreatedAt:   time.Now(),
 		UpdatedAt:   time.Now(),
-		Status:      "ready",
+		Status:      "installed", // New plugins start as installed, not ready
 		Health:      models.PluginHealth{Status: "unknown"},
 		Actions:     metadata.Actions,
 		Priority:    0,
@@ -592,10 +668,10 @@ func (ps *PluginService) DeactivatePlugin(slug string) (*models.Plugin, error) {
 		return nil, fmt.Errorf("plugin not found")
 	}
 
-	if plugin.Status == "inactive" {
+	if plugin.Status == "installed" {
 		ps.logger.WithFields(logger.Fields{
 			"plugin_slug": slug,
-		}).Info("Plugin already inactive")
+		}).Info("Plugin already installed (not active)")
 		return plugin, nil
 	}
 
@@ -616,7 +692,7 @@ func (ps *PluginService) DeactivatePlugin(slug string) (*models.Plugin, error) {
 		"plugin_slug": slug,
 	}).Info("CNI handles network cleanup automatically")
 
-	plugin.Status = "inactive"
+	plugin.Status = "installed"
 	plugin.UpdatedAt = time.Now()
 
 	if err := ps.savePluginsUnsafe(); err != nil {
@@ -625,7 +701,7 @@ func (ps *PluginService) DeactivatePlugin(slug string) (*models.Plugin, error) {
 
 	ps.logger.WithFields(logger.Fields{
 		"plugin_slug": slug,
-	}).Info("Plugin deactivated successfully with network cleanup")
+	}).Info("Plugin deactivated successfully (set to installed)")
 
 	return plugin, nil
 }
@@ -1174,25 +1250,25 @@ func (ps *PluginService) restoreActivePlugins() {
 	ps.logger.Info("Restoring active plugins after startup")
 
 	ps.mutex.RLock()
-	activePlugins := make([]*models.Plugin, 0)
+	pluginsToRestore := make([]*models.Plugin, 0)
 	for _, plugin := range ps.plugins {
 		if plugin.Status == "active" {
-			activePlugins = append(activePlugins, plugin)
+			pluginsToRestore = append(pluginsToRestore, plugin)
 		}
 	}
 	ps.mutex.RUnlock()
 
-	if len(activePlugins) == 0 {
+	if len(pluginsToRestore) == 0 {
 		ps.logger.Info("No active plugins to restore")
 		return
 	}
 
 	ps.logger.WithFields(logger.Fields{
-		"active_count": len(activePlugins),
+		"restore_count": len(pluginsToRestore),
 	}).Info("Found active plugins to restore")
 
-	// Restore each active plugin
-	for _, plugin := range activePlugins {
+	// Restore each plugin
+	for _, plugin := range pluginsToRestore {
 		ps.logger.WithFields(logger.Fields{
 			"plugin_slug": plugin.Slug,
 			"assigned_ip": plugin.AssignedIP,
@@ -1292,4 +1368,41 @@ func (ps *PluginService) restoreActivePlugins() {
 	}
 
 	ps.logger.Info("Active plugin restoration completed")
+}
+
+// isVersionHigher compares two version strings and returns true if version1 > version2
+// This is a simple semantic version comparison (x.y.z format)
+func (ps *PluginService) isVersionHigher(version1, version2 string) bool {
+	// Simple version comparison - split by dots and compare numerically
+	v1Parts := strings.Split(version1, ".")
+	v2Parts := strings.Split(version2, ".")
+
+	// Pad with zeros if needed
+	maxLen := len(v1Parts)
+	if len(v2Parts) > maxLen {
+		maxLen = len(v2Parts)
+	}
+
+	// Pad both arrays to same length
+	for len(v1Parts) < maxLen {
+		v1Parts = append(v1Parts, "0")
+	}
+	for len(v2Parts) < maxLen {
+		v2Parts = append(v2Parts, "0")
+	}
+
+	// Compare each part numerically
+	for i := 0; i < maxLen; i++ {
+		v1, _ := strconv.Atoi(v1Parts[i])
+		v2, _ := strconv.Atoi(v2Parts[i])
+
+		if v1 > v2 {
+			return true
+		} else if v1 < v2 {
+			return false
+		}
+	}
+
+	// Versions are equal
+	return false
 }

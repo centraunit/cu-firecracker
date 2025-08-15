@@ -38,10 +38,12 @@ def health():
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
         "plugin_type": "python-performance",
+        "version": "1.1.0",
         "requests_served": data_store["counters"]["requests"],
         "uptime_seconds": int(time.time() - start_time),
         "memory_usage": "low",
-        "response_time_ms": 1
+        "response_time_ms": 1,
+        "new_features": ["Enhanced analytics", "Version tracking", "Performance metrics"]
     })
 
 @app.route('/actions', methods=['GET'])
@@ -205,7 +207,14 @@ def handle_analytics_action():
                 "total_revenue": data_store["analytics"]["total_revenue"],
                 "average_order_value": round(avg_order_value, 2),
                 "calculations_performed": data_store["counters"]["calculations"],
-                "calculated_at": datetime.now().isoformat()
+                "calculated_at": datetime.now().isoformat(),
+                "version": "1.1.0",
+                "new_feature": "Enhanced analytics with version tracking",
+                "performance_metrics": {
+                    "response_time_ms": round((time.time() - start_time) * 1000, 2),
+                    "memory_efficient": True,
+                    "optimized": True
+                }
             }
             
             processing_time = (time.time() - start_time) * 1000

@@ -31,12 +31,16 @@ Think of it as a CMS where every plugin is completely isolated - like having sep
 - Isolated execution environment per plugin
 - Hot reloading and management
 - Priority-based action execution
+- Version control and upgrade management
+- Automatic plugin restoration on startup
 
 ### VM Management
 - Firecracker microVM integration
 - Snapshot-based fast startup
 - Resource isolation and limits
 - Network namespace isolation
+- Pre-warmed VM pool for instant execution
+- Graceful VM lifecycle management
 
 ### Development Tools
 - CLI tool for CMS management
@@ -128,6 +132,11 @@ The CMS will:
 - Perform health checks
 - Mark the plugin as "installed"
 
+**Version Control**: The CMS automatically handles version conflicts:
+- Higher versions automatically overwrite lower versions
+- Same version requires `force=true` parameter
+- Lower versions require `force=true` for downgrade
+
 ### 2. Activate
 
 Activate a plugin to make it available for execution:
@@ -142,6 +151,12 @@ This will:
 - Add the VM to the pre-warm pool
 - Mark the plugin as "active"
 
+**Plugin Restoration**: On CMS startup, active plugins are automatically restored:
+- VMs are recreated from snapshots
+- Pre-warmed pool is populated
+- Health checks are performed
+- Plugins remain ready for instant execution
+
 ### 3. Execute
 
 Execute actions across all active plugins:
@@ -155,6 +170,8 @@ curl -X POST -H "Content-Type: application/json" \
 The CMS will:
 - Find all active plugins that handle the action
 - Execute them in priority order
+- Use pre-warmed VMs for instant execution
+- Resume VMs from paused state for ultra-fast response
 
 ## API Reference
 
@@ -258,9 +275,11 @@ docker exec cu-firecracker-cms-dev ip addr show
 ## Performance
 
 - **VM Startup**: ~3ms from snapshot
-- **Plugin Execution**: ~14ms total (including network overhead)
+- **Plugin Execution**: ~13ms total (including network overhead)
 - **Memory Usage**: 2-5MB per VM
 - **Concurrent Execution**: Multiple plugins run in parallel
+- **Pre-warmed Execution**: Instant response from paused VMs
+- **Automatic Restoration**: Active plugins restored on startup
 
 ## Limitations
 
@@ -270,6 +289,7 @@ This is a proof of concept with some limitations:
 - **Root Privileges**: Network setup needs privileged container
 - **Snapshot Storage**: VM snapshots consume disk space
 - **Cold Start**: First plugin run requires VM boot
+- **Plugin States**: Only "installed", "active", and "failed" states supported
 
 ## Contributing
 
